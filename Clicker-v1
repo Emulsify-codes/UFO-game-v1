@@ -1,0 +1,647 @@
+
+import json
+import time
+from datetime import datetime
+from pathlib import Path
+import tkinter as tk
+from tkinter import messagebox
+
+
+BACKGROUND = "#0b1020"
+PANEL = "#151e33"
+PANEL_LIGHT = "#1c2942"
+TEXT = "#f4f7ff"
+MUTED = "#9caac4"
+ACCENT = "#7c6cff"
+ACCENT_HOVER = "#9588ff"
+MINT = "#57e3bb"
+GOLD = "#ffca62"
+
+root = tk.Tk()
+root.title("Clicking World")
+root.geometry("960x760")
+root.minsize(700, 600)
+root.configure(bg=BACKGROUND)
+
+LEADERBOARD_FILE = Path(__file__).with_name("leaderboard.json")
+
+canvas = tk.Canvas(root, bg=BACKGROUND, highlightthickness=0)
+canvas.pack(fill="both", expand=True)
+
+page = "home"
+run_active = False
+clicks = 0
+best = 0
+click_power = 1
+passive_remainder = 0.0
+shop_message = ""
+click_ripples = []
+ripple_animation_scheduled = False
+owned = {}
+upgrades = (
+    ("robot", "ROBOT", "Makes 10 clicks every second", 50, 10),
+    ("dinosaur", "DINOSAUR", "Makes 20 clicks every second", 150, 20),
+    ("gauntlet", "GAUNTLET", "Doubles every manual click", 300, 0),
+    ("elf", "HELPER ELF", "Makes 50 clicks every second", 750, 50),
+    ("dragon", "MINI DRAGON", "Makes 100 clicks every second", 1800, 100),
+    ("golden_gauntlet", "GOLDEN GAUNTLET", "Doubles every manual click", 4000, 0),
+    ("wizard", "CLICK WIZARD", "Makes 500 clicks every second", 10000, 500),
+    ("time_machine", "TIME MACHINE", "Makes 1,500 clicks every second", 30000, 1500),
+    ("click_cannon", "CLICK CANNON", "Makes 5,000 clicks every second", 90000, 5000),
+    ("cosmic_dino", "COSMIC DINO", "Makes 15,000 clicks every second", 300000, 15000),
+    ("infinity_gauntlet", "INFINITY GAUNTLET", "Doubles every manual click", 1000000, 0),
+    ("singularity", "CLICK SINGULARITY", "Makes 100,000 clicks every second", 5000000, 100000),
+)
+owned = {upgrade[0]: 0 for upgrade in upgrades}
+leaderboard = []
+leaderboard_load_error = None
+
+
+def load_leaderboard():
+    global leaderboard_load_error
+    try:
+        data = json.loads(LEADERBOARD_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, json.JSONDecodeError) as error:
+        leaderboard_load_error = str(error)
+        messagebox.showerror(
+            "Leaderboard unavailable",
+            f"Could not load {LEADERBOARD_FILE.name}:\n{error}",
+            parent=root,
+        )
+        return []
+
+    if not isinstance(data, list) or any(
+        not isinstance(entry, dict)
+        or not isinstance(entry.get("score"), int)
+        or not isinstance(entry.get("date"), str)
+        or not isinstance(entry.get("run"), int)
+        for entry in data
+    ):
+        leaderboard_load_error = "The file does not contain valid run records."
+        messagebox.showerror(
+            "Leaderboard unavailable",
+            f"{LEADERBOARD_FILE.name} does not contain valid run records.",
+            parent=root,
+        )
+        return []
+    return sorted(data, key=lambda entry: entry["score"], reverse=True)
+
+
+def save_run(score):
+    if leaderboard_load_error:
+        messagebox.showerror(
+            "Run not saved",
+            "The existing leaderboard could not be loaded, so it was left "
+            "unchanged. Fix leaderboard.json before starting another run.",
+            parent=root,
+        )
+        return
+
+    record = {
+        "run": len(leaderboard) + 1,
+        "score": score,
+        "date": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    updated = sorted(
+        [*leaderboard, record], key=lambda entry: entry["score"], reverse=True
+    )
+    try:
+        LEADERBOARD_FILE.write_text(
+            json.dumps(updated, indent=2) + "\n", encoding="utf-8",
+        )
+    except OSError as error:
+        messagebox.showerror(
+            "Run not saved",
+            f"Could not save the leaderboard:\n{error}",
+            parent=root,
+        )
+        return
+
+    leaderboard[:] = updated
+
+
+def finish_run():
+    global run_active
+    if not run_active:
+        return
+    save_run(best)
+    run_active = False
+
+
+def close_game():
+    finish_run()
+    root.destroy()
+
+shop_frame = tk.Frame(root, bg=BACKGROUND)
+shop_canvas = tk.Canvas(
+    shop_frame, bg=BACKGROUND, highlightthickness=0, borderwidth=0,
+)
+shop_scrollbar = tk.Scrollbar(
+    shop_frame, orient="vertical", command=shop_canvas.yview,
+    troughcolor=BACKGROUND, bg=PANEL_LIGHT, activebackground=ACCENT,
+)
+shop_canvas.configure(yscrollcommand=shop_scrollbar.set)
+shop_canvas.pack(side="left", fill="both", expand=True)
+shop_scrollbar.pack(side="right", fill="y")
+
+leaderboard_frame = tk.Frame(root, bg=BACKGROUND)
+leaderboard_canvas = tk.Canvas(
+    leaderboard_frame, bg=BACKGROUND, highlightthickness=0, borderwidth=0,
+)
+leaderboard_scrollbar = tk.Scrollbar(
+    leaderboard_frame, orient="vertical", command=leaderboard_canvas.yview,
+    troughcolor=BACKGROUND, bg=PANEL_LIGHT, activebackground=ACCENT,
+)
+leaderboard_canvas.configure(yscrollcommand=leaderboard_scrollbar.set)
+leaderboard_canvas.pack(side="left", fill="both", expand=True)
+leaderboard_scrollbar.pack(side="right", fill="y")
+leaderboard = load_leaderboard()
+
+
+def rounded_rectangle(x1, y1, x2, y2, radius=18, target=None, **kwargs):
+    target = target or canvas
+    radius = min(radius, (x2 - x1) / 2, (y2 - y1) / 2)
+    points = [
+        x1 + radius, y1,
+        x2 - radius, y1,
+        x2, y1,
+        x2, y1 + radius,
+        x2, y2 - radius,
+        x2, y2,
+        x2 - radius, y2,
+        x1 + radius, y2,
+        x1, y2,
+        x1, y2 - radius,
+        x1, y1 + radius,
+        x1, y1,
+    ]
+    return target.create_polygon(points, smooth=True, splinesteps=12, **kwargs)
+
+
+def draw_background(width, height):
+    canvas.create_oval(
+        width * 0.67, -height * 0.44, width * 1.16, height * 0.42,
+        fill="#111a33", outline="",
+    )
+    canvas.create_oval(
+        -width * 0.31, height * 0.64, width * 0.24, height * 1.24,
+        fill="#101a30", outline="",
+    )
+    for x, y, size, color in (
+        (0.12, 0.22, 3, "#6679aa"),
+        (0.82, 0.19, 3, "#6575a0"),
+        (0.88, 0.77, 4, "#3d9d91"),
+        (0.20, 0.81, 3, "#7168b1"),
+        (0.72, 0.36, 2, "#7b87ac"),
+        (0.31, 0.27, 2, "#63708f"),
+    ):
+        cx, cy = width * x, height * y
+        canvas.create_oval(cx - size, cy - size, cx + size, cy + size,
+                           fill=color, outline="")
+
+
+def draw_brand(width):
+    canvas.create_oval(30, 26, 64, 60, fill=ACCENT, outline="")
+    canvas.create_text(47, 43, text="C", fill=TEXT,
+                       font=("Segoe UI", 13, "bold"))
+    canvas.create_text(76, 43, anchor="w", text="CLICKING WORLD",
+                       fill=TEXT, font=("Segoe UI", 11, "bold"))
+    canvas.create_text(width - 34, 43, anchor="e", text="A LITTLE GAME. A LOT OF JOY.",
+                       fill=MUTED, font=("Segoe UI", 9, "bold"))
+
+
+def make_button(tag, bounds, label, command, fill=ACCENT,
+                hover=ACCENT_HOVER, text_color=TEXT, font_size=13,
+                target=None):
+    target = target or canvas
+    x1, y1, x2, y2 = bounds
+    rounded_rectangle(x1, y1, x2, y2, radius=16, target=target,
+                      fill=fill, outline="",
+                      tags=(tag, tag + "-surface"))
+    target.create_text((x1 + x2) / 2, (y1 + y2) / 2, text=label,
+                       fill=text_color, font=("Segoe UI", font_size, "bold"),
+                       tags=(tag,))
+
+    def on_enter(_event):
+        target.itemconfigure(tag + "-surface", fill=hover)
+        target.configure(cursor="hand2")
+
+    def on_leave(_event):
+        target.itemconfigure(tag + "-surface", fill=fill)
+        target.configure(cursor="")
+
+    target.tag_bind(tag, "<Button-1>", lambda _event: command())
+    target.tag_bind(tag + "-surface", "<Enter>", on_enter)
+    target.tag_bind(tag + "-surface", "<Leave>", on_leave)
+
+
+def show_home():
+    global page
+    finish_run()
+    page = "home"
+    root.title("Clicking World")
+    redraw()
+
+
+def show_game():
+    global best, click_power, clicks, page, passive_remainder
+    global run_active, shop_message, owned
+    if page != "game":
+        clicks = 0
+        best = 0
+        click_power = 1
+        passive_remainder = 0.0
+        shop_message = ""
+        owned = {upgrade[0]: 0 for upgrade in upgrades}
+        run_active = True
+        shop_canvas.yview_moveto(0)
+    page = "game"
+    root.title("Clicking World - Game")
+    redraw()
+
+
+def click_target():
+    global clicks, best, ripple_animation_scheduled
+    clicks += click_power
+    best = max(best, clicks)
+    click_ripples.append(time.monotonic())
+    redraw()
+    if not ripple_animation_scheduled:
+        ripple_animation_scheduled = True
+        root.after(16, animate_ripples)
+
+
+def draw_click_ripples():
+    canvas.delete("click-ripple")
+    if page != "game":
+        return
+
+    width = max(canvas.winfo_width(), 700)
+    height = max(canvas.winfo_height(), 600)
+    center = width / 2
+    card_bottom = height * 0.29 + 96
+    radius = min(68, width * 0.12, height * 0.11)
+    coin_y = card_bottom + radius + 22
+    now = time.monotonic()
+    colors = (GOLD, MINT, ACCENT, "#526184")
+
+    for started_at in click_ripples:
+        progress = (now - started_at) / 0.62
+        if not 0 <= progress < 1:
+            continue
+        color = colors[min(int(progress * len(colors)), len(colors) - 1)]
+        ring_radius = radius + 7 + progress * 130
+        canvas.create_oval(
+            center - ring_radius, coin_y - ring_radius,
+            center + ring_radius, coin_y + ring_radius,
+            outline=color, width=max(1, round(4 * (1 - progress))),
+            tags=("click-ripple",),
+        )
+
+    canvas.tag_lower("click-ripple", "click-surface")
+
+
+def animate_ripples():
+    global click_ripples, ripple_animation_scheduled
+    now = time.monotonic()
+    click_ripples = [
+        started_at for started_at in click_ripples
+        if now - started_at < 0.62
+    ]
+    draw_click_ripples()
+    if click_ripples:
+        root.after(16, animate_ripples)
+    else:
+        ripple_animation_scheduled = False
+
+
+def upgrade_cost(upgrade):
+    key, _name, _description, base_cost, _rate = upgrade
+    growth = 2 if key in (
+        "gauntlet", "golden_gauntlet", "infinity_gauntlet"
+    ) else 1.5
+    return round(base_cost * growth ** owned[key])
+
+
+def is_upgrade_unlocked(index):
+    return index == 0 or owned[upgrades[index - 1][0]] > 0
+
+
+def buy_upgrade(key):
+    global clicks, shop_message
+    index = next(i for i, item in enumerate(upgrades) if item[0] == key)
+    upgrade = upgrades[index]
+    if not is_upgrade_unlocked(index):
+        shop_message = f"Unlock {upgrades[index - 1][1]} first to access this upgrade."
+        redraw()
+        return
+    cost = upgrade_cost(upgrade)
+    if clicks < cost:
+        shop_message = f"Need {cost - clicks:,} more clicks for the {upgrade[1].lower()}."
+        redraw()
+        return
+
+    clicks -= cost
+    owned[key] += 1
+    if key in ("gauntlet", "golden_gauntlet", "infinity_gauntlet"):
+        global click_power
+        click_power *= 2
+        shop_message = f"{upgrade[1].title()} purchased! Your click power doubled."
+    else:
+        shop_message = f"{upgrade[1].title()} purchased! It is making clicks for you."
+    redraw()
+
+
+def clicks_per_second():
+    return sum(owned[key] * rate
+               for key, _name, _description, _cost, rate in upgrades)
+
+
+def draw_home(width, height):
+    center = width / 2
+    canvas.create_text(center, height * 0.15, text="WELCOME TO YOUR HAPPY PLACE",
+                       fill=MINT, font=("Segoe UI", 10, "bold"))
+    canvas.create_text(center, height * 0.215, text="Make every click",
+                       fill=TEXT, font=("Segoe UI", 39, "bold"))
+    canvas.create_text(center, height * 0.28, text="count.",
+                       fill=TEXT, font=("Segoe UI", 39, "bold"))
+    canvas.create_text(center, height * 0.32,
+                       text="A bright little clicker game made for your next break.",
+                       fill=MUTED, font=("Segoe UI", 12))
+
+    card_width = min(width - 64, 650)
+    left = (width - card_width) / 2
+    top = height * 0.35
+    bottom = top + 86
+    rounded_rectangle(left, top, left + card_width, bottom,
+                      radius=22, fill=PANEL, outline="#26324d", width=1)
+
+    stats = (
+        ("01", "CLICK", "Tap to build your score", ACCENT),
+        ("02", "IMPROVE", "Find your own rhythm", MINT),
+        ("03", "BEAT YOUR BEST", "Your record stays in view", GOLD),
+    )
+    column_width = card_width / 3
+    for index, (number, title, caption, color) in enumerate(stats):
+        x = left + column_width * index + 25
+        canvas.create_text(x, top + 22, anchor="w", text=number,
+                           fill=color, font=("Segoe UI", 10, "bold"))
+        canvas.create_text(x, top + 44, anchor="w", text=title,
+                           fill=TEXT, font=("Segoe UI", 10, "bold"))
+        canvas.create_text(x, top + 66, anchor="w", text=caption,
+                           fill=MUTED, font=("Segoe UI", 8))
+        if index < 2:
+            divider_x = left + column_width * (index + 1)
+            canvas.create_line(divider_x, top + 18, divider_x, bottom - 18,
+                               fill="#293650")
+
+    button_width = 210
+    button_top = bottom + 18
+    make_button("play", (center - button_width / 2, button_top,
+                         center + button_width / 2, button_top + 50),
+                "PLAY NOW   >", show_game, font_size=12)
+
+    board_top = button_top + 68
+    board_width = min(width - 64, 650)
+    board_height = max(80, height - board_top - 48)
+    board_left = (width - board_width) / 2
+    leaderboard_frame.place(x=board_left, y=board_top,
+                            width=board_width, height=board_height)
+    canvas.create_text(board_left, board_top - 13, anchor="w",
+                       text=f"LEADERBOARD  ·  ALL RUNS ({len(leaderboard)})",
+                       fill=MINT, font=("Segoe UI", 9, "bold"))
+
+    leaderboard_scroll_position = leaderboard_canvas.yview()[0]
+    leaderboard_canvas.delete("all")
+    leaderboard_canvas.create_rectangle(
+        0, 0, board_width - 18, max(board_height, len(leaderboard) * 34 + 8),
+        fill=PANEL, outline="#26324d",
+    )
+    if leaderboard:
+        for rank, record in enumerate(leaderboard, start=1):
+            y = 18 + (rank - 1) * 34
+            row_fill = "#202c45" if rank == 1 else PANEL
+            leaderboard_canvas.create_rectangle(
+                1, y - 14, board_width - 19, y + 14,
+                fill=row_fill, outline="",
+            )
+            leaderboard_canvas.create_text(
+                16, y, anchor="w", text=f"#{rank}",
+                fill=GOLD if rank == 1 else MUTED,
+                font=("Segoe UI", 9, "bold"),
+            )
+            leaderboard_canvas.create_text(
+                70, y, anchor="w", text=f"Run {record['run']}",
+                fill=TEXT, font=("Segoe UI", 9),
+            )
+            leaderboard_canvas.create_text(
+                board_width - 34, y, anchor="e", text=f"{record['score']:,}",
+                fill=TEXT, font=("Segoe UI", 10, "bold"),
+            )
+            leaderboard_canvas.create_text(
+                board_width - 130, y, anchor="e", text=record["date"][:10],
+                fill=MUTED, font=("Segoe UI", 8),
+            )
+    else:
+        leaderboard_canvas.create_text(
+            (board_width - 18) / 2, 28,
+            text="Finish a run and your score will appear here.",
+            fill=MUTED, font=("Segoe UI", 9),
+        )
+
+    leaderboard_canvas.configure(
+        scrollregion=leaderboard_canvas.bbox("all"),
+    )
+    leaderboard_canvas.yview_moveto(leaderboard_scroll_position)
+    canvas.create_text(center, height - 24, text="TAKE A BREATH. TAKE A CLICK.",
+                       fill="#66738e", font=("Segoe UI", 8, "bold"))
+
+
+def draw_game(width, height):
+    center = width / 2
+    make_button("back", (30, 78, 136, 120), "<  HOME", show_home,
+                fill=PANEL_LIGHT, hover="#293956", font_size=10)
+
+    canvas.create_text(center, height * 0.13, text="THE GAME ROOM",
+                       fill=MINT, font=("Segoe UI", 10, "bold"))
+    canvas.create_text(center, height * 0.20, text="Click. Score. Repeat.",
+                       fill=TEXT, font=("Segoe UI", 27, "bold"))
+    canvas.create_text(center, height * 0.25,
+                       text=f"{click_power} per tap   |   {clicks_per_second()} clicks / sec",
+                       fill=MUTED, font=("Segoe UI", 11))
+
+    card_width = min(width - 64, 540)
+    card_left = center - card_width / 2
+    card_top = height * 0.29
+    card_bottom = card_top + 96
+    rounded_rectangle(card_left, card_top, card_left + card_width, card_bottom,
+                      radius=22, fill=PANEL, outline="#26324d", width=1)
+    canvas.create_text(center, card_top + 21, text="YOUR CLICKS",
+                       fill=MUTED, font=("Segoe UI", 9, "bold"))
+    canvas.create_text(center, card_top + 58, text=f"{clicks:,}",
+                       fill=TEXT, font=("Segoe UI", 28, "bold"))
+    canvas.create_text(card_left + 24, card_top + 48, anchor="w",
+                       text="BEST", fill=GOLD, font=("Segoe UI", 8, "bold"))
+    canvas.create_text(card_left + card_width - 24, card_top + 48, anchor="e",
+                       text=f"{best:,}", fill=GOLD, font=("Segoe UI", 12, "bold"))
+
+    radius = min(68, width * 0.12, height * 0.11)
+    coin_y = card_bottom + radius + 22
+    canvas.create_oval(center - radius - 7, coin_y - radius - 7,
+                       center + radius + 7, coin_y + radius + 7,
+                       fill="#26324d", outline="")
+    canvas.create_oval(center - radius, coin_y - radius,
+                       center + radius, coin_y + radius,
+                       fill=GOLD, outline="#ffe0a2", width=3,
+                       tags=("click-target", "click-surface"))
+    canvas.create_text(center, coin_y, text="CLICK!",
+                       fill="#38280d", font=("Segoe UI", 15, "bold"),
+                       tags=("click-target",))
+    draw_click_ripples()
+    canvas.tag_bind("click-target", "<Button-1>", lambda _event: click_target())
+    canvas.tag_bind("click-surface", "<Enter>",
+                    lambda _event: canvas.configure(cursor="hand2"))
+    canvas.tag_bind("click-surface", "<Leave>",
+                    lambda _event: canvas.configure(cursor=""))
+
+    shop_top = coin_y + radius + 38
+    shop_width = min(width - 56, 860)
+    shop_left = center - shop_width / 2
+    viewport_height = max(80, height - shop_top - 68)
+    shop_frame.place(x=shop_left, y=shop_top, width=shop_width,
+                     height=viewport_height)
+    canvas.create_text(center, shop_top - 18, text="YOUR UPGRADES  •  SCROLL TO EXPLORE",
+                       fill=MINT, font=("Segoe UI", 10, "bold"))
+
+    shop_scroll_position = shop_canvas.yview()[0]
+    shop_canvas.delete("all")
+    shop_content_width = max(shop_width - 20, 1)
+    card_gap = 10
+    item_width = (shop_content_width - card_gap * 2) / 3
+    card_height = 132
+    row_gap = 10
+    for index, upgrade in enumerate(upgrades):
+        key, name, description, _base_cost, rate = upgrade
+        unlocked = is_upgrade_unlocked(index)
+        column = index % 3
+        row = index // 3
+        x1 = column * (item_width + card_gap)
+        x2 = x1 + item_width
+        y1 = row * (card_height + row_gap)
+        y2 = y1 + card_height
+        card_fill = PANEL if unlocked else "#101726"
+        rounded_rectangle(
+            x1, y1, x2, y2, radius=18, target=shop_canvas,
+            fill=card_fill, outline="#26324d" if unlocked else "#202a3b",
+            width=1,
+        )
+        shop_canvas.create_text(x1 + 14, y1 + 22, anchor="w", text=name,
+                                fill=TEXT if unlocked else MUTED,
+                                font=("Segoe UI", 10, "bold"),
+                                width=item_width - 28)
+        detail = f"+{rate}/sec" if rate else "x2 click power"
+        shop_canvas.create_text(x2 - 14, y1 + 47, anchor="e", text=detail,
+                                fill=GOLD, font=("Segoe UI", 8, "bold"))
+        card_description = description
+        if not unlocked:
+            card_description = f"Unlock {upgrades[index - 1][1]} first"
+        shop_canvas.create_text(
+            x1 + 14, y1 + 53, anchor="w", text=card_description,
+            fill=MUTED, font=("Segoe UI", 8), width=item_width - 28,
+            justify="left",
+        )
+        shop_canvas.create_text(
+            x1 + 14, y1 + 83, anchor="w",
+            text=f"OWNED  {owned[key]}" if unlocked else "LOCKED",
+            fill=MINT if unlocked else "#77839a",
+            font=("Segoe UI", 8, "bold"),
+        )
+        if unlocked:
+            price = upgrade_cost(upgrade)
+            can_afford = clicks >= price
+            button_fill = ACCENT if can_afford else "#30394c"
+            button_width = min(150, item_width - 28)
+            make_button(f"buy-{key}",
+                        (x1 + 14, y2 - 42, x1 + 14 + button_width, y2 - 10),
+                        f"BUY  {price:,}", lambda item=key: buy_upgrade(item),
+                        fill=button_fill,
+                        hover=ACCENT_HOVER if can_afford else "#30394c",
+                        text_color=TEXT if can_afford else MUTED,
+                        font_size=9, target=shop_canvas)
+
+    message = shop_message or "Click the coin or press SPACE  •  Upgrades keep working over time"
+    canvas.create_text(center, height - 19, text=message,
+                       fill=MUTED, font=("Segoe UI", 8))
+    shop_canvas.configure(scrollregion=shop_canvas.bbox("all"))
+    shop_canvas.yview_moveto(shop_scroll_position)
+
+
+def scroll_shop(event):
+    if event.delta:
+        shop_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+    return "break"
+
+
+def scroll_leaderboard(event):
+    if event.delta:
+        leaderboard_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+    return "break"
+
+
+def redraw(_event=None):
+    width = max(canvas.winfo_width(), 700)
+    height = max(canvas.winfo_height(), 600)
+    canvas.delete("all")
+    draw_background(width, height)
+    draw_brand(width)
+    if page == "home":
+        shop_frame.place_forget()
+        draw_home(width, height)
+    else:
+        leaderboard_frame.place_forget()
+        draw_game(width, height)
+
+
+def handle_key(event):
+    if page == "game" and event.keysym == "space":
+        click_target()
+        return "break"
+    if event.keysym == "Escape" and page == "game":
+        show_home()
+        return "break"
+    return None
+
+
+last_tick = time.monotonic()
+
+
+def game_tick():
+    global clicks, best, passive_remainder, last_tick
+    now = time.monotonic()
+    elapsed = now - last_tick
+    last_tick = now
+
+    rate = clicks_per_second() if run_active else 0
+    if rate:
+        passive_remainder += rate * elapsed
+        earned = int(passive_remainder)
+        if earned:
+            clicks += earned
+            best = max(best, clicks)
+            passive_remainder -= earned
+            if page == "game":
+                redraw()
+
+    root.after(100, game_tick)
+
+
+canvas.bind("<Configure>", redraw)
+shop_canvas.bind("<MouseWheel>", scroll_shop)
+leaderboard_canvas.bind("<MouseWheel>", scroll_leaderboard)
+root.bind("<Key>", handle_key)
+canvas.focus_set()
+root.protocol("WM_DELETE_WINDOW", close_game)
+root.after(100, game_tick)
+root.mainloop()
