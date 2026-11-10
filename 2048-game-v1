@@ -1,0 +1,369 @@
+import random
+import tkinter as tk
+
+
+class Board:
+    EMPTY_COLOR = "#252b3a"
+    GRID_COLOR = "#171c29"
+    TILE_COLORS = {
+        2: ("#f2eee8", "#354052"),
+        4: ("#e9dfc9", "#354052"),
+        8: ("#f4b860", "#ffffff"),
+        16: ("#f28f52", "#ffffff"),
+        32: ("#ed6a5a", "#ffffff"),
+        64: ("#d94f70", "#ffffff"),
+        128: ("#bd65b5", "#ffffff"),
+        256: ("#8d70d6", "#ffffff"),
+        512: ("#5e83d6", "#ffffff"),
+        1024: ("#397fb8", "#ffffff"),
+        2048: ("#27a88a", "#ffffff"),
+    }
+
+    def __init__(self, window):
+        self.n = 4
+        self.window = window
+        self.window.title("2048 | Merge & Match")
+        self.window.configure(bg="#101522")
+        self.window.resizable(False, False)
+        self.window.geometry("480x650")
+
+        self.gridCell = [[0] * self.n for _ in range(self.n)]
+        self.score = 0
+        self.best_score = 0
+        self.combo = 0
+        self.merge_count = 0
+        self.move_score = 0
+        self.compress = False
+        self.merge = False
+        self.moved = False
+
+        container = tk.Frame(window, bg="#101522", padx=24, pady=20)
+        container.pack(fill="both", expand=True)
+
+        header = tk.Frame(container, bg="#101522")
+        header.pack(fill="x", pady=(0, 16))
+        tk.Label(
+            header,
+            text="2048",
+            font=("Segoe UI", 34, "bold"),
+            bg="#101522",
+            fg="#f7f5f0",
+        ).pack(side="left")
+        tk.Label(
+            header,
+            text="MERGE & MATCH",
+            font=("Segoe UI", 9, "bold"),
+            bg="#101522",
+            fg="#8f9bb3",
+        ).pack(side="left", padx=(12, 0), pady=(17, 0))
+
+        stats = tk.Frame(container, bg="#101522")
+        stats.pack(fill="x", pady=(0, 16))
+        self.score_label = self._make_stat(stats, "SCORE", "0")
+        self.best_label = self._make_stat(stats, "BEST", "0")
+        self.combo_label = self._make_stat(stats, "COMBO", "READY")
+
+        self.status_label = tk.Label(
+            container,
+            text="Slide the tiles and build a merge streak.",
+            font=("Segoe UI", 10),
+            bg="#101522",
+            fg="#aeb8ca",
+            anchor="w",
+        )
+        self.status_label.pack(fill="x", pady=(0, 10))
+
+        self.gameArea = tk.Frame(
+            container, bg=Board.GRID_COLOR, padx=8, pady=8
+        )
+        self.gameArea.pack()
+        self.board = []
+        for row in range(self.n):
+            labels = []
+            for col in range(self.n):
+                label = tk.Label(
+                    self.gameArea,
+                    text="",
+                    bg=Board.EMPTY_COLOR,
+                    fg="#ffffff",
+                    font=("Segoe UI", 23, "bold"),
+                    width=5,
+                    height=2,
+                    bd=0,
+                )
+                label.grid(row=row, column=col, padx=5, pady=5)
+                labels.append(label)
+            self.board.append(labels)
+
+        footer = tk.Frame(container, bg="#101522")
+        footer.pack(fill="x", pady=(16, 0))
+        tk.Label(
+            footer,
+            text="ARROW KEYS  /  WASD",
+            font=("Segoe UI", 9, "bold"),
+            bg="#101522",
+            fg="#8f9bb3",
+        ).pack(side="left", pady=8)
+        self.new_game_button = tk.Button(
+            footer,
+            text="NEW GAME",
+            command=self.new_game,
+            font=("Segoe UI", 9, "bold"),
+            bg="#397fb8",
+            fg="#ffffff",
+            activebackground="#4a91ca",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=14,
+            pady=9,
+            cursor="hand2",
+        )
+        self.new_game_button.pack(side="right")
+
+    @staticmethod
+    def _make_stat(parent, title, initial_value):
+        card = tk.Frame(parent, bg="#20283a", padx=12, pady=7)
+        card.pack(side="left", padx=(0, 8), fill="x", expand=True)
+        tk.Label(
+            card,
+            text=title,
+            font=("Segoe UI", 8, "bold"),
+            bg="#20283a",
+            fg="#94a1b8",
+        ).pack()
+        value = tk.Label(
+            card,
+            text=initial_value,
+            font=("Segoe UI", 15, "bold"),
+            bg="#20283a",
+            fg="#ffffff",
+        )
+        value.pack()
+        return value
+
+    def reverse(self):
+        for row in self.gridCell:
+            row.reverse()
+
+    def transpose(self):
+        self.gridCell = [list(row) for row in zip(*self.gridCell)]
+
+    def compressGrid(self):
+        self.compress = False
+        temp = [[0] * self.n for _ in range(self.n)]
+        for row in range(self.n):
+            values = [value for value in self.gridCell[row] if value != 0]
+            temp[row][:len(values)] = values
+            if values != self.gridCell[row][:len(values)] or any(
+                self.gridCell[row][len(values):]
+            ):
+                self.compress = True
+        self.gridCell = temp
+
+    def mergeGrid(self):
+        self.merge = False
+        for row in range(self.n):
+            for col in range(self.n - 1):
+                value = self.gridCell[row][col]
+                if value != 0 and value == self.gridCell[row][col + 1]:
+                    self.gridCell[row][col] *= 2
+                    self.gridCell[row][col + 1] = 0
+                    self.move_score += self.gridCell[row][col]
+                    self.merge_count += 1
+                    self.merge = True
+
+    def random_cell(self):
+        empty_cells = [
+            (row, col)
+            for row in range(self.n)
+            for col in range(self.n)
+            if self.gridCell[row][col] == 0
+        ]
+        if empty_cells:
+            row, col = random.choice(empty_cells)
+            self.gridCell[row][col] = 2
+
+    def can_merge(self):
+        for row in range(self.n):
+            for col in range(self.n - 1):
+                if (
+                    self.gridCell[row][col] != 0
+                    and self.gridCell[row][col] == self.gridCell[row][col + 1]
+                ):
+                    return True
+
+        for row in range(self.n - 1):
+            for col in range(self.n):
+                if (
+                    self.gridCell[row][col] != 0
+                    and self.gridCell[row][col] == self.gridCell[row + 1][col]
+                ):
+                    return True
+        return False
+
+    def paintGrid(self):
+        for row in range(self.n):
+            for col in range(self.n):
+                value = self.gridCell[row][col]
+                if value == 0:
+                    self.board[row][col].config(
+                        text="", bg=Board.EMPTY_COLOR, fg="#ffffff"
+                    )
+                else:
+                    bg, fg = Board.TILE_COLORS.get(
+                        value, ("#245f68", "#ffffff")
+                    )
+                    font_size = 23 if value < 1000 else 19
+                    self.board[row][col].config(
+                        text=str(value),
+                        bg=bg,
+                        fg=fg,
+                        font=("Segoe UI", font_size, "bold"),
+                    )
+
+    def update_stats(self):
+        self.score_label.config(text=f"{self.score:,}")
+        self.best_label.config(text=f"{self.best_score:,}")
+        if self.combo:
+            multiplier = min(1 + 0.25 * (self.combo - 1), 2)
+            self.combo_label.config(text=f"x{multiplier:.2f}")
+            self.combo_label.master.config(bg="#2d765f")
+            for child in self.combo_label.master.winfo_children():
+                child.config(bg="#2d765f")
+        else:
+            self.combo_label.config(text="READY")
+            self.combo_label.master.config(bg="#20283a")
+            for child in self.combo_label.master.winfo_children():
+                child.config(bg="#20283a")
+
+    def new_game(self):
+        self.gridCell = [[0] * self.n for _ in range(self.n)]
+        self.score = 0
+        self.combo = 0
+        self.update_stats()
+        self.status_label.config(
+            text="Slide the tiles and build a merge streak.", fg="#aeb8ca"
+        )
+        self.random_cell()
+        self.random_cell()
+        self.paintGrid()
+
+
+class Game:
+    def __init__(self, gamepanel):
+        self.gamepanel = gamepanel
+        self.end = False
+        self.won = False
+        self.gamepanel.new_game_button.config(command=self.restart)
+
+    def start(self):
+        self.restart()
+        self.gamepanel.window.bind("<Key>", self.link_keys)
+        self.gamepanel.window.mainloop()
+
+    def restart(self):
+        self.end = False
+        self.won = False
+        self.gamepanel.new_game()
+
+    def link_keys(self, event):
+        if self.end or self.won:
+            return
+
+        directions = {
+            "Up": "up",
+            "w": "up",
+            "Down": "down",
+            "s": "down",
+            "Left": "left",
+            "a": "left",
+            "Right": "right",
+            "d": "right",
+        }
+        direction = directions.get(event.keysym)
+        if direction is None:
+            return
+
+        board = self.gamepanel
+        board.compress = False
+        board.merge = False
+        board.moved = False
+        board.merge_count = 0
+        board.move_score = 0
+
+        if direction == "up":
+            board.transpose()
+            board.compressGrid()
+            board.mergeGrid()
+            board.moved = board.compress or board.merge
+            board.compressGrid()
+            board.transpose()
+        elif direction == "down":
+            board.transpose()
+            board.reverse()
+            board.compressGrid()
+            board.mergeGrid()
+            board.moved = board.compress or board.merge
+            board.compressGrid()
+            board.reverse()
+            board.transpose()
+        elif direction == "left":
+            board.compressGrid()
+            board.mergeGrid()
+            board.moved = board.compress or board.merge
+            board.compressGrid()
+        else:
+            board.reverse()
+            board.compressGrid()
+            board.mergeGrid()
+            board.moved = board.compress or board.merge
+            board.compressGrid()
+            board.reverse()
+
+        if not board.moved:
+            return
+
+        bonus = 0
+        if board.merge_count:
+            board.combo += 1
+            multiplier = min(1 + 0.25 * (board.combo - 1), 2)
+            bonus = int(board.move_score * (multiplier - 1))
+            board.score += board.move_score + bonus
+            board.status_label.config(
+                text=(
+                    f"{board.merge_count} merge"
+                    f"{'s' if board.merge_count != 1 else ''}  •  "
+                    f"+{board.move_score:,} points"
+                    + (f"  •  +{bonus:,} combo bonus" if bonus else "")
+                ),
+                fg="#75d6ad",
+            )
+        else:
+            board.combo = 0
+            board.status_label.config(
+                text="No merge this turn — your combo has reset.",
+                fg="#aeb8ca",
+            )
+
+        board.best_score = max(board.best_score, board.score)
+        board.random_cell()
+        board.paintGrid()
+        board.update_stats()
+
+        if any(value >= 2048 for row in board.gridCell for value in row):
+            self.won = True
+            board.status_label.config(
+                text="2048 reached! You won — start a new game to play again.",
+                fg="#f4c95d",
+            )
+        elif not any(0 in row for row in board.gridCell) and not board.can_merge():
+            self.end = True
+            board.status_label.config(
+                text="No moves left. Start a new game and try again!",
+                fg="#ed6a5a",
+            )
+
+
+if __name__ == "__main__":
+    gamepanel = Board(tk.Tk())
+    Game(gamepanel).start()
