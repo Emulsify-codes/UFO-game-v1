@@ -1,0 +1,1367 @@
+"""
+Balloon Defense - a tower defense game in pygame.
+
+Upgrades: every tower has 3 upgrade paths with 5 tiers each.
+  - Only ONE path can go past tier 2 (up to tier 5).
+  - Only ONE other path can be upgraded, and only up to tier 2.
+  - The third path is locked at 0.
+  e.g. 5-2-0 is allowed, 3-2-0 is allowed, 5-3-0 and 2-2-2 are not.
+
+Controls
+  Click a tower in the shop, then click the map to place it (Shift = place several)
+  Click a placed tower to upgrade / sell / change targeting
+  SPACE  start next round      F  toggle fast-forward
+  ESC    cancel / deselect     R  restart after game over
+"""
+import math
+import random
+import sys
+
+import pygame
+
+pygame.init()
+W, H = 1100, 700
+MAP_W = 850
+screen = pygame.display.set_mode((W, H))
+pygame.display.set_caption("Balloon Defense")
+clock = pygame.time.Clock()
+FONT = pygame.font.SysFont("arial", 16)
+BIG = pygame.font.SysFont("arial", 30, bold=True)
+SMALL = pygame.font.SysFont("arial", 13)
+
+GRASS = (86, 160, 80)
+TRACK = (196, 170, 120)
+TRACK_EDGE = (150, 125, 85)
+PANEL = (40, 44, 56)
+WHITE = (240, 240, 240)
+
+WAYPOINTS = [(-30, 120), (200, 120), (200, 300), (80, 300), (80, 520), (360, 520),
+             (360, 200), (560, 200), (560, 440), (760, 440), (760, 100), (880, 100)]
+PATH_WIDTH = 44
+
+# ---- path helpers ---------------------------------------------------------
+SEG = []
+TOTAL = 0.0
+for a, b in zip(WAYPOINTS, WAYPOINTS[1:]):
+    length = math.dist(a, b)
+    SEG.append((TOTAL, length, a, b))
+    TOTAL += length
+
+
+def pos_at(d):
+    for start, length, a, b in SEG:
+        if d <= start + length:
+            t = (d - start) / length
+            return a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
+    return WAYPOINTS[-1]
+
+
+def dist_to_path(p):
+    best = 1e9
+    for _, _, a, b in SEG:
+        ax, ay = a
+        bx, by = b
+        dx, dy = bx - ax, by - ay
+        t = max(0, min(1, ((p[0] - ax) * dx + (p[1] - ay) * dy) / (dx * dx + dy * dy)))
+        best = min(best, math.dist(p, (ax + dx * t, ay + dy * t)))
+    return best
+
+
+# ---- drawing helpers ------------------------------------------------------
+TICK = [0]  # animation clock (frames)
+PATH_COLORS = [(250, 205, 70), (90, 210, 250), (245, 110, 205)]
+
+
+def shade(c, f):
+    return tuple(max(0, min(255, int(v * f))) for v in c)
+
+
+def blend(c1, c2, t):
+    return tuple(int(a + (b - a) * t) for a, b in zip(c1, c2))
+
+
+def rot_rect(cx, cy, ang, start, length, width):
+    """Rectangle pointing along `ang`, starting `start` px from (cx, cy)."""
+    ca, sa = math.cos(ang), math.sin(ang)
+    hw = width / 2
+    pts = []
+    for u, v in ((start, -hw), (start + length, -hw), (start + length, hw), (start, hw)):
+        pts.append((cx + u * ca - v * sa, cy + u * sa + v * ca))
+    return pts
+
+
+def regular_poly(cx, cy, r, n, rot):
+    return [(cx + math.cos(rot + math.tau * i / n) * r, cy + math.sin(rot + math.tau * i / n) * r)
+            for i in range(n)]
+
+
+def build_bg():
+    rng = random.Random(7)
+    bg = pygame.Surface((MAP_W, H))
+    bg.fill(GRASS)
+    for _ in range(90):
+        pygame.draw.circle(bg, shade(GRASS, rng.uniform(0.92, 1.08)),
+                           (rng.randint(0, MAP_W), rng.randint(0, H)), rng.randint(25, 70))
+    for _ in range(900):
+        x, y = rng.randint(0, MAP_W), rng.randint(0, H)
+        pygame.draw.line(bg, shade(GRASS, rng.choice((0.8, 1.2))), (x, y),
+                         (x + rng.randint(-2, 2), y - rng.randint(3, 6)), 1)
+    for _ in range(45):
+        pygame.draw.circle(bg, rng.choice(((250, 240, 120), (255, 255, 255), (250, 170, 210))),
+                           (rng.randint(0, MAP_W), rng.randint(0, H)), 2)
+    for _, _, a, b in SEG:
+        pygame.draw.line(bg, TRACK_EDGE, a, b, PATH_WIDTH + 8)
+    for p in WAYPOINTS[1:-1]:
+        pygame.draw.circle(bg, TRACK_EDGE, p, PATH_WIDTH // 2 + 4)
+    for _, _, a, b in SEG:
+        pygame.draw.line(bg, TRACK, a, b, PATH_WIDTH)
+    for p in WAYPOINTS[1:-1]:
+        pygame.draw.circle(bg, TRACK, p, PATH_WIDTH // 2)
+    for _ in range(350):
+        px, py = pos_at(rng.uniform(0, TOTAL))
+        pygame.draw.circle(bg, shade(TRACK, rng.choice((0.85, 1.1))),
+                           (int(px + rng.uniform(-17, 17)), int(py + rng.uniform(-17, 17))), rng.randint(1, 2))
+    placed = tries = 0
+    while placed < 16 and tries < 600:
+        tries += 1
+        p = (rng.randint(25, MAP_W - 25), rng.randint(25, H - 25))
+        if dist_to_path(p) < 75:
+            continue
+        x, y = p
+        pygame.draw.ellipse(bg, shade(GRASS, 0.7), (x - 18, y + 8, 36, 14))
+        pygame.draw.rect(bg, (105, 72, 40), (x - 3, y - 2, 6, 14))
+        pygame.draw.circle(bg, (40, 105, 48), (x, y - 8), 16)
+        pygame.draw.circle(bg, (55, 130, 60), (x - 3, y - 12), 12)
+        pygame.draw.circle(bg, (80, 160, 80), (x - 6, y - 15), 6)
+        placed += 1
+    return bg
+
+
+# ---- balloons -------------------------------------------------------------
+TIER_COLORS = {1: (220, 50, 50), 2: (60, 110, 230), 3: (60, 190, 70),
+               4: (240, 210, 50), 5: (240, 120, 190), 6: (50, 50, 55)}
+TIER_SPEED = {1: 1.4, 2: 1.8, 3: 2.2, 4: 2.8, 5: 3.4, 6: 2.6}
+
+
+class Balloon:
+    def __init__(self, tier, dist=0.0, boss=False, hp=120):
+        self.tier = tier
+        self.dist = dist
+        self.boss = boss
+        self.hp = hp if boss else 0
+        self.max_hp = self.hp
+        self.slow_timer = 0
+        self.alive = True
+        self.x, self.y = pos_at(dist)
+
+    @property
+    def speed(self):
+        s = 0.7 if self.boss else TIER_SPEED[self.tier]
+        return s * (0.45 if self.slow_timer > 0 else 1)
+
+    @property
+    def radius(self):
+        return 26 if self.boss else 13 + (self.tier > 3)
+
+    def update(self):
+        self.dist += self.speed
+        if self.slow_timer > 0:
+            self.slow_timer -= 1
+        self.x, self.y = pos_at(self.dist)
+
+    def draw_blimp(self, surf, x, y):
+        t = TICK[0]
+        r = self.radius
+        f = 1 if pos_at(self.dist + 6)[0] >= self.x else -1  # facing direction
+        L, hh = r * 1.9, r * 0.95
+        pygame.draw.ellipse(surf, (60, 110, 60), (x - L * 0.8, y + r + 16, L * 1.6, 12))  # ground shadow
+        for s in (-1, 1):  # tail fins
+            pts = [(x - f * L * 0.75, y + s * hh * 0.55), (x - f * (L + 14), y + s * (hh + 12)),
+                   (x - f * (L + 14), y + s * 2)]
+            pygame.draw.polygon(surf, (70, 45, 120), pts)
+        body = pygame.Rect(int(x - L), int(y - hh), int(L * 2), int(hh * 2))
+        pygame.draw.ellipse(surf, (50, 30, 90), body)
+        pygame.draw.ellipse(surf, (112, 82, 175), body.inflate(-4, -4))
+        for k in (-0.45, 0, 0.45):  # stripes
+            px = x + k * L
+            half = hh * math.sqrt(1 - k * k) - 3
+            pygame.draw.line(surf, (82, 56, 140), (px, y - half), (px, y + half), 3)
+        pygame.draw.ellipse(surf, (165, 135, 220), pygame.Rect(int(x - L * 0.55), int(y - hh * 0.8),
+                                                                  int(L * 0.8), int(hh * 0.5)))
+        pygame.draw.rect(surf, (70, 70, 80), (x - 12, y + hh - 3, 24, 9), border_radius=3)  # gondola
+        pygame.draw.circle(surf, (190, 220, 250), (int(x + f * L * 0.6), int(y - 2)), 4)  # porthole
+        px, py = x - f * (L + 16), y
+        a = t * 0.5
+        pygame.draw.line(surf, (30, 30, 35), (px - math.cos(a) * 8, py - math.sin(a) * 8),
+                         (px + math.cos(a) * 8, py + math.sin(a) * 8), 3)  # propeller
+        w = 70
+        pygame.draw.rect(surf, (70, 0, 0), (x - w // 2, y - r - 18, w, 8), border_radius=4)
+        pygame.draw.rect(surf, (60, 210, 70),
+                         (x - w // 2, y - r - 18, w * max(0, self.hp) / self.max_hp, 8), border_radius=4)
+        pygame.draw.rect(surf, (20, 20, 20), (x - w // 2, y - r - 18, w, 8), 1, border_radius=4)
+
+    def draw(self, surf):
+        x, y = int(self.x), int(self.y)
+        if self.boss:
+            self.draw_blimp(surf, x, y)
+            return
+        t = TICK[0]
+        base = TIER_COLORS[self.tier]
+        slowed = self.slow_timer > 0
+        if slowed:
+            base = blend(base, (190, 235, 255), 0.55)
+        r = self.radius
+        sway = math.sin(t * 0.12 + self.dist * 0.04) * 2.0
+        cx = x + sway
+        bw, bh = r * 1.75, r * 2.2
+        top = y - r * 1.15
+        bottom = top + bh
+        # wavy string
+        pts = [(cx, bottom + 3)]
+        for i in range(1, 4):
+            pts.append((cx + math.sin(t * 0.15 + i + self.dist * 0.05) * 3, bottom + 3 + i * 6))
+        pygame.draw.lines(surf, (215, 215, 215), False, pts, 1)
+        # body: outline, shade, base colour, glossy highlight
+        body = pygame.Rect(int(cx - bw / 2), int(top), int(bw), int(bh))
+        pygame.draw.ellipse(surf, shade(base, 0.5), body)
+        pygame.draw.ellipse(surf, shade(base, 0.82), body.inflate(-3, -3))
+        pygame.draw.ellipse(surf, base, body.inflate(-7, -7).move(-1, -1))
+        pygame.draw.ellipse(surf, shade(base, 1.3), pygame.Rect(int(cx - bw * 0.3), int(top + bh * 0.13),
+                                                                int(bw * 0.34), int(bh * 0.34)))
+        pygame.draw.ellipse(surf, (255, 255, 255), pygame.Rect(int(cx - bw * 0.3), int(top + bh * 0.16),
+                                                               max(2, int(bw * 0.15)), max(3, int(bh * 0.2))))
+        # knot
+        pygame.draw.polygon(surf, shade(base, 0.55), [(cx, bottom - 1), (cx - 3, bottom + 4), (cx + 3, bottom + 4)])
+        if slowed:
+            pygame.draw.circle(surf, (235, 250, 255), (int(cx + r * 0.5), int(y - r * 0.3)), 2)
+
+
+# ---- projectiles ----------------------------------------------------------
+class Dart:
+    def __init__(self, x, y, angle, speed, dmg, pierce, life, bm=1, color=(250, 250, 250)):
+        self.x, self.y = x, y
+        self.vx, self.vy = math.cos(angle) * speed, math.sin(angle) * speed
+        self.dmg, self.pierce, self.life, self.bm = dmg, pierce, life, bm
+        self.hit = set()
+        self.color = color
+        self.alive = True
+
+    def update(self, game):
+        self.x += self.vx
+        self.y += self.vy
+        self.life -= 1
+        if self.life <= 0:
+            self.alive = False
+            return
+        for b in game.balloons:
+            if b.alive and id(b) not in self.hit and math.dist((self.x, self.y), (b.x, b.y)) < b.radius + 4:
+                self.hit.add(id(b))
+                game.damage(b, self.dmg, self.bm)
+                self.pierce -= 1
+                if self.pierce <= 0:
+                    self.alive = False
+                    return
+
+    def draw(self, surf):
+        end = (self.x - self.vx * 1.6, self.y - self.vy * 1.6)
+        pygame.draw.line(surf, self.color, (self.x, self.y), end, 2)
+        pygame.draw.circle(surf, (60, 60, 70), (int(self.x), int(self.y)), 3)
+        pygame.draw.circle(surf, (230, 230, 240), (int(self.x), int(self.y)), 1)
+
+
+class Bomb:
+    def __init__(self, x, y, tx, ty, dmg, radius, bm=1):
+        self.x, self.y = x, y
+        d = max(1, math.dist((x, y), (tx, ty)))
+        self.vx, self.vy = (tx - x) / d * 7, (ty - y) / d * 7
+        self.tx, self.ty = tx, ty
+        self.dmg, self.radius, self.bm = dmg, radius, bm
+        self.alive = True
+
+    def update(self, game):
+        self.x += self.vx
+        self.y += self.vy
+        if math.dist((self.x, self.y), (self.tx, self.ty)) < 8:
+            self.alive = False
+            game.effects.append(["boom", self.tx, self.ty, self.radius, 14])
+            for b in list(game.balloons):
+                if b.alive and math.dist((b.x, b.y), (self.tx, self.ty)) < self.radius + b.radius:
+                    game.damage(b, self.dmg, self.bm)
+
+    def draw(self, surf):
+        x, y = int(self.x), int(self.y)
+        pygame.draw.circle(surf, (20, 20, 24), (x, y), 7)
+        pygame.draw.circle(surf, (70, 70, 80), (x - 2, y - 2), 2)
+        pygame.draw.circle(surf, (255, 170, 40), (x + 4, y - 6), 2)
+
+
+class Chakram:
+    """Spinning disc that flies out to a point, then returns, hitting balloons both ways."""
+
+    def __init__(self, ox, oy, tx, ty, dmg, pierce, bm):
+        self.x, self.y = ox, oy
+        self.ox, self.oy, self.tx, self.ty = ox, oy, tx, ty
+        self.dmg, self.max_pierce, self.bm = dmg, pierce, bm
+        self.left = pierce
+        self.phase = 0
+        self.hit = set()
+        self.spin = 0.0
+        self.age = 0
+        self.alive = True
+
+    def turn(self):
+        if self.phase == 0:
+            self.phase = 1
+            self.hit.clear()
+            self.left = self.max_pierce
+        else:
+            self.alive = False
+
+    def update(self, game):
+        self.age += 1
+        self.spin += 0.5
+        if self.age > 300:
+            self.alive = False
+            return
+        gx, gy = (self.tx, self.ty) if self.phase == 0 else (self.ox, self.oy)
+        d = math.dist((self.x, self.y), (gx, gy))
+        if d <= 7:
+            self.turn()
+            return
+        self.x += (gx - self.x) / d * 7
+        self.y += (gy - self.y) / d * 7
+        for b in game.balloons:
+            if b.alive and id(b) not in self.hit and math.dist((self.x, self.y), (b.x, b.y)) < b.radius + 8:
+                self.hit.add(id(b))
+                game.damage(b, self.dmg, self.bm)
+                self.left -= 1
+                if self.left <= 0:
+                    self.turn()
+                    return
+
+    def draw(self, surf):
+        x, y = int(self.x), int(self.y)
+        for i in range(4):
+            a = self.spin + i * math.pi / 2
+            pygame.draw.polygon(surf, (245, 245, 250), [
+                (x + math.cos(a) * 10, y + math.sin(a) * 10),
+                (x + math.cos(a + 0.6) * 4, y + math.sin(a + 0.6) * 4),
+                (x + math.cos(a - 0.6) * 4, y + math.sin(a - 0.6) * 4)])
+        pygame.draw.circle(surf, (200, 120, 50), (x, y), 5)
+        pygame.draw.circle(surf, (60, 40, 25), (x, y), 2)
+
+
+class Mine:
+    """Sits on the track and explodes when a balloon touches it."""
+
+    def __init__(self, x, y, dmg, radius, bm, owner):
+        self.x, self.y = x, y
+        self.dmg, self.radius, self.bm, self.owner = dmg, radius, bm, owner
+        self.life = 1500
+        self.alive = True
+
+    def update(self, game):
+        self.life -= 1
+        if self.life <= 0:
+            self.alive = False
+            return
+        for b in game.balloons:
+            if b.alive and math.dist((self.x, self.y), (b.x, b.y)) < b.radius + 12:
+                self.alive = False
+                game.effects.append(["boom", self.x, self.y, self.radius, 14])
+                for o in list(game.balloons):
+                    if o.alive and math.dist((o.x, o.y), (self.x, self.y)) <= self.radius + o.radius:
+                        game.damage(o, self.dmg, self.bm)
+                return
+
+    def draw(self, surf):
+        x, y = int(self.x), int(self.y)
+        pygame.draw.circle(surf, (25, 25, 28), (x, y), 8)
+        pygame.draw.circle(surf, (70, 75, 60), (x, y), 6)
+        blink = (TICK[0] // 20) % 2
+        pygame.draw.circle(surf, (235, 60, 50) if blink else (110, 30, 30), (x, y), 2)
+
+
+# ---- towers & upgrade paths -----------------------------------------------
+# Each path: (name, [5 x (cost, upgrade name, {stat: change})])
+# Stats: range, rate (cooldown in frames, lower = faster), dmg, pierce, shots,
+#        radius, freeze, boss_mult (extra damage multiplier vs bosses), income ($ per round)
+TOWER_TYPES = {
+    "Dart Turret": dict(
+        cost=200, color=(200, 150, 60), range=125, rate=40, dmg=1, pierce=2, shots=1,
+        desc="Fast, cheap, reliable",
+        paths=[
+            ("Piercing", [
+                (120, "Sharp Darts", dict(pierce=2)),
+                (200, "Barbed Darts", dict(pierce=3)),
+                (450, "Spear Darts", dict(pierce=5, dmg=1)),
+                (1500, "Needle Storm", dict(pierce=10, dmg=1)),
+                (9000, "Skewer King", dict(pierce=25, dmg=3)),
+            ]),
+            ("Speed", [
+                (150, "Quick Hands", dict(rate=-6)),
+                (250, "Rapid Fire", dict(rate=-8, range=10)),
+                (600, "Hyper Fire", dict(rate=-8, shots=1)),
+                (1800, "Blur Barrage", dict(rate=-6, shots=1)),
+                (7500, "Dart Storm", dict(rate=-4, shots=4, dmg=1)),
+            ]),
+            ("Reach", [
+                (100, "Long Range", dict(range=25)),
+                (180, "Keen Eyes", dict(range=30)),
+                (500, "Heavy Darts", dict(dmg=1, range=20)),
+                (1800, "Marksman", dict(dmg=2, pierce=3)),
+                (7000, "Ace Gunner", dict(dmg=5, boss_mult=2, range=40)),
+            ]),
+        ]),
+    "Tack Ring": dict(
+        cost=300, color=(220, 90, 90), range=75, rate=55, dmg=1, pierce=1, shots=8,
+        desc="Fires in all directions",
+        paths=[
+            ("Volume", [
+                (150, "More Tacks", dict(shots=2)),
+                (250, "Tack Bundle", dict(shots=2)),
+                (500, "Tack Wheel", dict(shots=4)),
+                (2000, "Tack Blizzard", dict(shots=8)),
+                (9000, "Tack Nova", dict(shots=16, rate=-10)),
+            ]),
+            ("Fire Rate", [
+                (120, "Hot Hands", dict(rate=-8)),
+                (220, "Faster Loop", dict(rate=-8)),
+                (500, "Overclock", dict(rate=-8, range=10)),
+                (1700, "Turbine", dict(rate=-8)),
+                (7500, "Tack Gatling", dict(rate=-12, dmg=1)),
+            ]),
+            ("Heat", [
+                (100, "Hot Tacks", dict(range=10, pierce=1)),
+                (200, "Sharper Tacks", dict(pierce=1, range=10)),
+                (550, "Searing Tacks", dict(dmg=1)),
+                (1800, "Blazing Tacks", dict(dmg=1, pierce=2, range=15)),
+                (6500, "Inferno Ring", dict(dmg=3, boss_mult=2)),
+            ]),
+        ]),
+    "Bomb Cannon": dict(
+        cost=450, color=(70, 70, 90), range=150, rate=90, dmg=1, radius=50,
+        desc="Area damage",
+        paths=[
+            ("Blast", [
+                (200, "Big Blast", dict(radius=10)),
+                (320, "Wide Blast", dict(radius=12)),
+                (700, "Heavy Shells", dict(dmg=1, radius=10)),
+                (2200, "Mega Shells", dict(dmg=2, radius=15)),
+                (9500, "Doom Cannon", dict(dmg=6, radius=25)),
+            ]),
+            ("Reload", [
+                (200, "Fast Loader", dict(rate=-12)),
+                (300, "Quick Fuse", dict(rate=-12)),
+                (650, "Belt Feed", dict(rate=-12)),
+                (2000, "Rapid Mortar", dict(rate=-16)),
+                (8000, "Auto Cannon", dict(rate=-20, dmg=1)),
+            ]),
+            ("Siege", [
+                (150, "Long Barrel", dict(range=25)),
+                (250, "Spotter", dict(range=30)),
+                (600, "Armor Piercing", dict(range=30, dmg=1)),
+                (2000, "Bunker Buster", dict(boss_mult=2)),
+                (7500, "Titan Slayer", dict(boss_mult=6, dmg=2)),
+            ]),
+        ]),
+    "Frost Tower": dict(
+        cost=350, color=(110, 190, 240), range=85, rate=110, freeze=90, dmg=0,
+        desc="Slows nearby balloons",
+        paths=[
+            ("Chill", [
+                (150, "Colder Air", dict(freeze=30)),
+                (250, "Icy Grip", dict(freeze=30, range=10)),
+                (550, "Deep Freeze", dict(freeze=60)),
+                (1800, "Glacial Aura", dict(freeze=120)),
+                (6000, "Permafrost", dict(freeze=300, rate=-20)),
+            ]),
+            ("Cold Snap", [
+                (150, "Quick Pulse", dict(rate=-15)),
+                (250, "Fast Pulse", dict(rate=-15)),
+                (500, "Rapid Pulse", dict(rate=-15)),
+                (1600, "Flash Freeze", dict(rate=-15)),
+                (6500, "Blizzard", dict(rate=-25, dmg=1, range=20)),
+            ]),
+            ("Frostbite", [
+                (250, "Frost Sting", dict(dmg=1)),
+                (300, "Wide Sting", dict(range=20)),
+                (700, "Ice Shards", dict(dmg=1)),
+                (2500, "Shatter", dict(dmg=2, range=20)),
+                (9000, "Absolute Zero", dict(dmg=6, boss_mult=2)),
+            ]),
+        ]),
+    "Sniper": dict(
+        cost=400, color=(60, 120, 70), range=9999, rate=110, dmg=3,
+        desc="Hits anywhere on the map",
+        paths=[
+            ("Power", [
+                (300, "Hollow Points", dict(dmg=2)),
+                (500, "Heavy Rounds", dict(dmg=3)),
+                (1000, "Armor Piercer", dict(dmg=5)),
+                (3500, "Anti-Titan", dict(dmg=10)),
+                (12000, "Railgun", dict(dmg=30, boss_mult=3)),
+            ]),
+            ("Speed", [
+                (300, "Quick Bolt", dict(rate=-15)),
+                (400, "Fast Bolt", dict(rate=-15)),
+                (800, "Semi-Auto", dict(rate=-15)),
+                (2500, "Burst Rifle", dict(rate=-12)),
+                (9000, "Machine Sniper", dict(rate=-25, dmg=3)),
+            ]),
+            ("Bounty", [
+                (400, "Scavenger", dict(income=25)),
+                (600, "Bounty Hunter", dict(income=40, dmg=1)),
+                (1200, "Supply Line", dict(income=80)),
+                (3000, "Trade Route", dict(income=150)),
+                (8000, "War Economy", dict(income=400)),
+            ]),
+        ]),
+    "Storm Coil": dict(
+        cost=450, color=(140, 110, 210), range=100, rate=55, dmg=1, chain=3,
+        desc="Chain lightning between balloons",
+        paths=[
+            ("Conduction", [
+                (200, "Extra Arc", dict(chain=1)),
+                (300, "Forked Bolt", dict(chain=2)),
+                (700, "Arc Web", dict(chain=3, range=10)),
+                (2200, "Storm Web", dict(chain=6)),
+                (9000, "Tempest", dict(chain=12, dmg=1)),
+            ]),
+            ("Voltage", [
+                (250, "Hot Wire", dict(dmg=1)),
+                (400, "High Voltage", dict(dmg=1)),
+                (900, "Overload", dict(dmg=2, boss_mult=1)),
+                (3000, "Thunder Strike", dict(dmg=4)),
+                (11000, "Wrath of Storms", dict(dmg=12, boss_mult=3)),
+            ]),
+            ("Charge", [
+                (150, "Quick Charge", dict(rate=-8)),
+                (250, "Long Reach", dict(range=25)),
+                (600, "Capacitor", dict(rate=-10, range=15)),
+                (1800, "Rapid Pulse", dict(rate=-12)),
+                (7000, "Perpetual Storm", dict(rate=-12, range=40, chain=3)),
+            ]),
+        ]),
+    "Chakram Thrower": dict(
+        cost=400, color=(235, 140, 60), range=130, rate=70, dmg=1, pierce=4, shots=1,
+        desc="Boomerang discs hit going and coming",
+        paths=[
+            ("Edge", [
+                (150, "Honed Blade", dict(pierce=3)),
+                (250, "Razor Edge", dict(pierce=5)),
+                (600, "Serrated", dict(dmg=1, pierce=5)),
+                (2000, "Vorpal Disc", dict(dmg=2, pierce=10)),
+                (9000, "Reaper Wheel", dict(dmg=6, pierce=25)),
+            ]),
+            ("Throw", [
+                (150, "Quick Throw", dict(rate=-10)),
+                (300, "Twin Discs", dict(shots=1)),
+                (700, "Triple Toss", dict(shots=1, rate=-10)),
+                (2200, "Disc Fan", dict(shots=2, rate=-10)),
+                (8000, "Chakram Storm", dict(shots=4, rate=-10)),
+            ]),
+            ("Reach", [
+                (100, "Longer Throw", dict(range=25)),
+                (200, "Far Throw", dict(range=30)),
+                (500, "Weighted Disc", dict(range=20, dmg=1)),
+                (1800, "Hunter Disc", dict(range=40, pierce=4)),
+                (6500, "Skybreaker", dict(range=60, dmg=3, boss_mult=2)),
+            ]),
+        ]),
+    "Flame Brazier": dict(
+        cost=400, color=(220, 100, 40), range=75, rate=24, dmg=1, cone=0.45,
+        desc="Burns everything in front of it",
+        paths=[
+            ("Heat", [
+                (200, "Hotter Fire", dict(dmg=1)),
+                (350, "Blue Flame", dict(dmg=1)),
+                (800, "Inferno", dict(dmg=2)),
+                (2500, "Firestorm", dict(dmg=4)),
+                (9500, "Sun Fire", dict(dmg=12, boss_mult=2)),
+            ]),
+            ("Spread", [
+                (150, "Wide Nozzle", dict(cone=0.12)),
+                (250, "Fan Flame", dict(cone=0.15)),
+                (600, "Flame Wave", dict(cone=0.2, range=10)),
+                (1800, "Fire Ring", dict(cone=0.5)),
+                (7000, "Ring of Fire", dict(cone=3, range=15)),
+            ]),
+            ("Fuel", [
+                (150, "Pressure Tank", dict(rate=-3)),
+                (250, "Long Hose", dict(range=15)),
+                (500, "Turbo Pump", dict(rate=-4, range=10)),
+                (1700, "Napalm", dict(rate=-4, range=15, dmg=1)),
+                (6500, "Dragon Breath", dict(rate=-4, range=25, boss_mult=2)),
+            ]),
+        ]),
+    "Mine Layer": dict(
+        cost=350, color=(110, 120, 60), range=130, rate=100, dmg=2, radius=38, shots=1, cap=6,
+        desc="Drops mines on the track",
+        paths=[
+            ("Payload", [
+                (200, "Bigger Charge", dict(dmg=1)),
+                (300, "Wide Blast", dict(radius=10)),
+                (700, "Heavy Mines", dict(dmg=2, radius=8)),
+                (2200, "Cluster Mines", dict(dmg=3, radius=12)),
+                (9000, "Megaton", dict(dmg=10, radius=30)),
+            ]),
+            ("Logistics", [
+                (200, "Quick Drop", dict(rate=-15)),
+                (300, "Twin Mines", dict(shots=1)),
+                (650, "Bigger Rack", dict(cap=6, rate=-15)),
+                (2000, "Mine Field", dict(shots=2, cap=10)),
+                (8000, "Carpet Layer", dict(shots=4, cap=20, rate=-20)),
+            ]),
+            ("Reach", [
+                (150, "Longer Chute", dict(range=25)),
+                (250, "Surveyor", dict(range=30)),
+                (600, "Armor Breakers", dict(boss_mult=1, range=20)),
+                (1800, "Siege Mines", dict(boss_mult=2, dmg=2)),
+                (7000, "Titan Mines", dict(boss_mult=5, dmg=3)),
+            ]),
+        ]),
+    "Trading Post": dict(
+        cost=500, color=(210, 170, 60), range=90, rate=60, dmg=0, income=35, interest=0, aura=0,
+        desc="Earns money, speeds up nearby towers",
+        paths=[
+            ("Trade", [
+                (250, "More Stalls", dict(income=25)),
+                (400, "Caravan", dict(income=40)),
+                (900, "Guild Hall", dict(income=90)),
+                (2500, "Trade Empire", dict(income=200)),
+                (9000, "Golden Age", dict(income=600)),
+            ]),
+            ("Banking", [
+                (250, "Savings", dict(interest=1)),
+                (400, "Deposits", dict(interest=1)),
+                (900, "Investments", dict(interest=2)),
+                (2500, "Hedge Fund", dict(interest=3)),
+                (9000, "Central Bank", dict(interest=5)),
+            ]),
+            ("Support", [
+                (300, "Cheer", dict(aura=6)),
+                (450, "Rally Cry", dict(aura=5, range=15)),
+                (1000, "Banner", dict(aura=8, range=15)),
+                (2800, "War Drums", dict(aura=8, range=20)),
+                (9500, "Warlord", dict(aura=12, range=30)),
+            ]),
+        ]),
+    "Prism Tower": dict(
+        cost=500, color=(170, 170, 250), range=125, rate=50, dmg=1, shots=1,
+        desc="Beam pierces everything in a line",
+        paths=[
+            ("Focus", [
+                (250, "Clear Lens", dict(dmg=1)),
+                (400, "Sharp Focus", dict(dmg=1)),
+                (900, "Concentrator", dict(dmg=2)),
+                (2800, "Death Ray", dict(dmg=5)),
+                (10000, "Sunbeam", dict(dmg=15, boss_mult=3)),
+            ]),
+            ("Split", [
+                (300, "Twin Beam", dict(shots=1)),
+                (500, "Tri-Beam", dict(shots=1)),
+                (1000, "Fan Beam", dict(shots=1)),
+                (2800, "Rainbow", dict(shots=2)),
+                (9000, "Prismatic Burst", dict(shots=4)),
+            ]),
+            ("Optics", [
+                (200, "Wider Aperture", dict(range=20)),
+                (300, "Pulse Rate", dict(rate=-8)),
+                (650, "Overcharge", dict(rate=-10, range=15)),
+                (2000, "Rapid Pulse", dict(rate=-10, range=20)),
+                (7500, "Continuous", dict(rate=-14, range=40)),
+            ]),
+        ]),
+}
+MODES = ["First", "Last", "Strong"]
+NO_TARGET = ("Frost Tower", "Trading Post")
+STAT_LABEL = dict(range="range", pierce="pierce", dmg="damage", shots="shots", radius="blast",
+                  freeze="freeze time", boss_mult="boss dmg x", income="$/round", chain="chain links",
+                  cone="spread", aura="% ally speed", interest="% interest", cap="mine cap")
+
+
+def describe(mods):
+    parts = []
+    for k, v in mods.items():
+        if k == "rate":
+            parts.append("faster fire")
+        else:
+            parts.append(f"+{v:g} {STAT_LABEL[k]}")
+    return ", ".join(parts)
+
+
+def stat_text(t):
+    s = t.stats
+    if t.kind == "Trading Post":
+        return [f"Income ${s['income']}/rd", f"Interest {s['interest']}%", f"Ally speed {s['aura']}%",
+                f"Range {s['range']}"]
+    parts = []
+    if s.get("dmg"):
+        parts.append(f"Dmg {s['dmg']}")
+    parts.append(f"{60 / s['rate']:.1f} shots/s")
+    if s["range"] < 5000:
+        parts.append(f"Range {s['range']}")
+    for k, lab in (("pierce", "Pierce"), ("shots", "Shots"), ("radius", "Blast"), ("chain", "Chain"),
+                   ("cone", "Spread"), ("cap", "Mines"), ("freeze", "Freeze")):
+        if k in s:
+            parts.append(f"{lab} {s[k]:g}")
+    if s["boss_mult"] > 1:
+        parts.append(f"Boss x{s['boss_mult']}")
+    if s["income"]:
+        parts.append(f"+${s['income']}/rd")
+    return parts
+
+
+class Tower:
+    def __init__(self, kind, x, y):
+        self.kind = kind
+        self.x, self.y = x, y
+        self.base = TOWER_TYPES[kind]
+        skip = ("paths", "desc", "color", "cost")
+        self.stats = {k: v for k, v in self.base.items() if k not in skip}
+        self.stats.setdefault("boss_mult", 1)
+        self.stats.setdefault("income", 0)
+        self.tiers = [0, 0, 0]
+        self.cooldown = 0
+        self.angle = 0.0
+        self.mode = 0
+        self.recoil = 0
+        self.spent = self.base["cost"]
+
+    def upgrade_status(self, path):
+        """Returns (upgrade tuple or None, reason). reason is None if allowed by the path rules."""
+        tier = self.tiers[path]
+        if tier >= 5:
+            return None, "Maxed"
+        new = self.tiers[:]
+        new[path] = tier + 1
+        if sum(1 for t in new if t > 0) > 2:
+            return self.base["paths"][path][1][tier], "Locked"
+        if sum(1 for t in new if t > 2) > 1:
+            return self.base["paths"][path][1][tier], "Locked"
+        return self.base["paths"][path][1][tier], None
+
+    def upgrade(self, path):
+        up, reason = self.upgrade_status(path)
+        if reason:
+            return False
+        cost, _, mods = up
+        for k, v in mods.items():
+            self.stats[k] = self.stats.get(k, 0) + v
+        self.stats["rate"] = max(8, self.stats["rate"])
+        self.spent += cost
+        self.tiers[path] += 1
+        return True
+
+    def pick(self, balloons):
+        r = self.stats["range"]
+        cands = [b for b in balloons if b.alive and math.dist((b.x, b.y), (self.x, self.y)) <= r + b.radius]
+        if not cands:
+            return None
+        if self.mode == 0:
+            return max(cands, key=lambda b: b.dist)
+        if self.mode == 1:
+            return min(cands, key=lambda b: b.dist)
+        return max(cands, key=lambda b: (b.hp if b.boss else b.tier))
+
+    def update(self, game):
+        if self.recoil > 0:
+            self.recoil -= 1
+        if self.cooldown > 0:
+            self.cooldown -= 1
+            return
+        s = self.stats
+        bm = s["boss_mult"]
+        if self.kind == "Trading Post":
+            return
+        if self.kind == "Frost Tower":
+            hit = False
+            for b in game.balloons:
+                if b.alive and math.dist((b.x, b.y), (self.x, self.y)) <= s["range"]:
+                    b.slow_timer = max(b.slow_timer, s["freeze"])
+                    hit = True
+                    if s["dmg"]:
+                        game.damage(b, s["dmg"], bm)
+            if hit:
+                game.effects.append(["ring", self.x, self.y, s["range"], 12])
+                self.cooldown = max(4, int(s["rate"] * game.buff_for(self)))
+                self.recoil = 8
+            return
+        target = self.pick(game.balloons)
+        if not target:
+            return
+        self.angle = math.atan2(target.y - self.y, target.x - self.x)
+        self.cooldown = max(4, int(s["rate"] * game.buff_for(self)))
+        self.recoil = 8
+        if self.kind == "Dart Turret":
+            n = s["shots"]
+            for i in range(n):
+                off = (i - (n - 1) / 2) * 0.18
+                game.projectiles.append(Dart(self.x, self.y, self.angle + off, 9, s["dmg"], s["pierce"],
+                                             int(s["range"] / 9) + 6, bm))
+        elif self.kind == "Tack Ring":
+            n = s["shots"]
+            for i in range(n):
+                a = math.tau * i / n
+                game.projectiles.append(Dart(self.x, self.y, a, 6, s["dmg"], s["pierce"],
+                                             int((s["range"] + 6) / 6), bm, (255, 200, 120)))
+        elif self.kind == "Bomb Cannon":
+            game.projectiles.append(Bomb(self.x, self.y, target.x, target.y, s["dmg"], s["radius"], bm))
+        elif self.kind == "Sniper":
+            game.effects.append(["shot", self.x, self.y, target.x, target.y, 6])
+            game.damage(target, s["dmg"], bm)
+        elif self.kind == "Storm Coil":
+            hits, prev, cur = [], (self.x, self.y), target
+            for _ in range(int(s["chain"])):
+                if cur is None:
+                    break
+                hits.append(cur)
+                game.effects.append(["bolt", prev[0], prev[1], cur.x, cur.y, 7])
+                game.damage(cur, s["dmg"], bm)
+                prev = (cur.x, cur.y)
+                nxt = [b for b in game.balloons
+                       if b.alive and b not in hits and math.dist((b.x, b.y), prev) <= 85]
+                cur = min(nxt, key=lambda b: math.dist((b.x, b.y), prev)) if nxt else None
+        elif self.kind == "Chakram Thrower":
+            n = int(s["shots"])
+            d = min(s["range"], max(60, math.dist((target.x, target.y), (self.x, self.y)) + 25))
+            for i in range(n):
+                ang = self.angle + (i - (n - 1) / 2) * 0.5
+                game.projectiles.append(Chakram(self.x, self.y, self.x + math.cos(ang) * d,
+                                                self.y + math.sin(ang) * d, s["dmg"], int(s["pierce"]), bm))
+        elif self.kind == "Flame Brazier":
+            cone = min(s["cone"], math.pi)
+            game.effects.append(["flame", self.x, self.y, self.angle, s["range"], cone, 8])
+            for b in list(game.balloons):
+                if not b.alive:
+                    continue
+                dx, dy = b.x - self.x, b.y - self.y
+                if math.hypot(dx, dy) <= s["range"] + b.radius:
+                    to = math.atan2(dy, dx)
+                    diff = math.atan2(math.sin(to - self.angle), math.cos(to - self.angle))
+                    if abs(diff) <= cone:
+                        game.damage(b, s["dmg"], bm)
+        elif self.kind == "Mine Layer":
+            count = sum(1 for p in game.projectiles if isinstance(p, Mine) and p.owner is self)
+            for i in range(int(s["shots"])):
+                if count >= s["cap"]:
+                    break
+                d = min(TOTAL, target.dist + 25 + i * 26)
+                mx, my = pos_at(d)
+                if math.dist((mx, my), (self.x, self.y)) > s["range"] + 20:
+                    mx, my = target.x, target.y
+                game.projectiles.append(Mine(mx, my, s["dmg"], s["radius"], bm, self))
+                count += 1
+        elif self.kind == "Prism Tower":
+            n = int(s["shots"])
+            length = s["range"] + 60
+            for i in range(n):
+                ang = self.angle + (i - (n - 1) / 2) * 0.3
+                ca, sa = math.cos(ang), math.sin(ang)
+                game.effects.append(["beam", self.x, self.y, self.x + ca * length, self.y + sa * length, 7])
+                for b in list(game.balloons):
+                    if not b.alive:
+                        continue
+                    bx, by = b.x - self.x, b.y - self.y
+                    along = bx * ca + by * sa
+                    perp = abs(-bx * sa + by * ca)
+                    if 0 <= along <= length and perp <= b.radius + 3:
+                        game.damage(b, s["dmg"], bm)
+
+    def draw(self, surf, selected=False):
+        x, y = int(self.x), int(self.y)
+        t = TICK[0]
+        col = self.base["color"]
+        a = self.angle
+        ca, sa = math.cos(a), math.sin(a)
+        rc = self.recoil * 0.6
+        # ground shadow, upgrade glow rings (one per path at tier 3+), stone base plate
+        pygame.draw.ellipse(surf, (55, 105, 55), (x - 22, y + 6, 44, 18))
+        for i, n in enumerate(self.tiers):
+            if n >= 3:
+                pygame.draw.circle(surf, PATH_COLORS[i], (x, y), 24 + (n - 3) * 2, 2)
+        pygame.draw.circle(surf, (70, 70, 78), (x, y), 21)
+        pygame.draw.circle(surf, (135, 135, 148), (x, y), 19)
+        pygame.draw.circle(surf, (105, 105, 118), (x, y), 19, 2)
+
+        if self.kind == "Dart Turret":
+            pygame.draw.circle(surf, shade(col, 0.55), (x, y), 14)
+            pygame.draw.circle(surf, col, (x, y), 12)
+            pygame.draw.circle(surf, shade(col, 1.4), (x - 3, y - 3), 5)
+            pygame.draw.polygon(surf, (85, 85, 95), rot_rect(x, y, a, 4 - rc, 18, 6))
+            pygame.draw.polygon(surf, (35, 35, 40), rot_rect(x, y, a, 4 - rc, 18, 6), 1)
+            base_d, tip_d = 21 - rc, 28 - rc
+            px, py = -sa * 3, ca * 3
+            pygame.draw.polygon(surf, (235, 235, 245), [(x + ca * tip_d, y + sa * tip_d),
+                                                         (x + ca * base_d + px, y + sa * base_d + py),
+                                                         (x + ca * base_d - px, y + sa * base_d - py)])
+            pygame.draw.circle(surf, (50, 40, 25), (x, y), 4)
+
+        elif self.kind == "Tack Ring":
+            n = min(16, int(self.stats["shots"]))
+            spin = t * 0.02
+            for i in range(n):
+                ang = spin + math.tau * i / n
+                tipx, tipy = x + math.cos(ang) * 21, y + math.sin(ang) * 21
+                w = 0.28 * 8 / n * 1.6
+                pygame.draw.polygon(surf, (245, 225, 190), [
+                    (tipx, tipy),
+                    (x + math.cos(ang - w) * 11, y + math.sin(ang - w) * 11),
+                    (x + math.cos(ang + w) * 11, y + math.sin(ang + w) * 11)])
+            pygame.draw.circle(surf, shade(col, 0.55), (x, y), 13)
+            pygame.draw.circle(surf, col, (x, y), 11)
+            pygame.draw.circle(surf, shade(col, 1.4), (x - 3, y - 3), 4)
+            pygame.draw.circle(surf, (60, 25, 25), (x, y), 4)
+            if self.recoil:
+                pygame.draw.circle(surf, (255, 230, 180), (x, y), 14 + (8 - self.recoil) * 2, 1)
+
+        elif self.kind == "Bomb Cannon":
+            pygame.draw.circle(surf, (25, 25, 30), (x - 13, y + 11), 5)
+            pygame.draw.circle(surf, (25, 25, 30), (x + 13, y + 11), 5)
+            pygame.draw.circle(surf, (90, 90, 100), (x - 13, y + 11), 2)
+            pygame.draw.circle(surf, (90, 90, 100), (x + 13, y + 11), 2)
+            pygame.draw.circle(surf, (35, 35, 45), (x, y), 15)
+            pygame.draw.circle(surf, (62, 62, 80), (x, y), 13)
+            pygame.draw.polygon(surf, (38, 38, 46), rot_rect(x, y, a, -rc, 22, 12))
+            pygame.draw.polygon(surf, (95, 95, 110), rot_rect(x, y, a, 18 - rc, 5, 15))
+            pygame.draw.circle(surf, (95, 95, 110), (x, y), 6)
+            pygame.draw.circle(surf, (255, 150, 40), (x, y - 1), 2)
+
+        elif self.kind == "Frost Tower":
+            glow = pygame.Surface((64, 64), pygame.SRCALPHA)
+            pygame.draw.circle(glow, (130, 210, 255, 55), (32, 32), 26 + int(2 * math.sin(t * 0.1)))
+            surf.blit(glow, (x - 32, y - 32))
+            rot = t * 0.01
+            pygame.draw.polygon(surf, shade(col, 0.55), regular_poly(x, y, 16, 6, rot))
+            pygame.draw.polygon(surf, col, regular_poly(x, y, 14, 6, rot))
+            pygame.draw.polygon(surf, (215, 242, 255), regular_poly(x, y, 8, 6, -rot))
+            for i in range(3):
+                ang = math.pi * i / 3 + rot
+                pygame.draw.line(surf, (255, 255, 255), (x - math.cos(ang) * 7, y - math.sin(ang) * 7),
+                                 (x + math.cos(ang) * 7, y + math.sin(ang) * 7), 1)
+            if self.recoil:
+                pygame.draw.circle(surf, (235, 250, 255), (x, y), 15 + (8 - self.recoil) * 2, 1)
+
+        elif self.kind == "Sniper":
+            pygame.draw.circle(surf, shade(col, 0.55), (x, y), 13)
+            pygame.draw.circle(surf, col, (x, y), 11)
+            pygame.draw.circle(surf, shade(col, 1.4), (x - 3, y - 3), 4)
+            pygame.draw.polygon(surf, (30, 35, 30), rot_rect(x, y, a, 2 - rc, 34, 4))
+            pygame.draw.polygon(surf, (15, 15, 18), rot_rect(x, y, a, 32 - rc, 5, 7))
+            scx, scy = x - sa * 5, y + ca * 5
+            pygame.draw.polygon(surf, (20, 20, 25), rot_rect(scx, scy, a, 4, 11, 4))
+            pygame.draw.circle(surf, (140, 210, 255), (int(scx + ca * 15), int(scy + sa * 15)), 2)
+            pygame.draw.circle(surf, (40, 60, 40), (x, y), 4)
+
+        elif self.kind == "Storm Coil":
+            for rr, cc in ((14, (90, 70, 150)), (11, (120, 95, 190)), (8, (150, 125, 220))):
+                pygame.draw.circle(surf, cc, (x, y), rr)
+                pygame.draw.circle(surf, shade(cc, 0.6), (x, y), rr, 1)
+            glow = int(2 * math.sin(t * 0.3)) + (3 if self.recoil else 0)
+            pygame.draw.circle(surf, (150, 235, 255), (x, y), 5 + glow)
+            pygame.draw.circle(surf, (255, 255, 255), (x, y), 2)
+            for i in range(3):
+                ang = t * 0.25 + i * 2.1
+                r1 = 6 + (t * 7 + i * 5) % 6
+                pygame.draw.line(surf, (200, 245, 255), (x + math.cos(ang) * 5, y + math.sin(ang) * 5),
+                                 (x + math.cos(ang + 0.3) * r1 + 3, y + math.sin(ang + 0.3) * r1), 1)
+
+        elif self.kind == "Chakram Thrower":
+            pygame.draw.circle(surf, shade(col, 0.55), (x, y), 14)
+            pygame.draw.circle(surf, col, (x, y), 12)
+            pygame.draw.polygon(surf, (70, 50, 35), rot_rect(x, y, a, 2 - rc, 14, 6))
+            spin = t * 0.08
+            for i in range(4):
+                ang = spin + i * math.pi / 2
+                pygame.draw.polygon(surf, (245, 245, 250), [
+                    (x + math.cos(ang) * 11, y + math.sin(ang) * 11),
+                    (x + math.cos(ang + 0.7) * 4, y + math.sin(ang + 0.7) * 4),
+                    (x + math.cos(ang - 0.7) * 4, y + math.sin(ang - 0.7) * 4)])
+            pygame.draw.circle(surf, (60, 40, 25), (x, y), 3)
+
+        elif self.kind == "Flame Brazier":
+            pygame.draw.circle(surf, (45, 30, 28), (x, y), 14)
+            pygame.draw.circle(surf, col, (x, y), 12)
+            pygame.draw.polygon(surf, (50, 45, 45), rot_rect(x, y, a, 3 - rc, 14, 8))
+            pygame.draw.polygon(surf, (90, 80, 80), rot_rect(x, y, a, 14 - rc, 4, 10))
+            fl = 3 + int(2 * math.sin(t * 0.4))
+            pygame.draw.circle(surf, (255, 190, 50), (x, y), 6 + fl)
+            pygame.draw.circle(surf, (255, 240, 150), (x, y), 3 + fl // 2)
+
+        elif self.kind == "Mine Layer":
+            pygame.draw.circle(surf, shade(col, 0.55), (x, y), 14)
+            pygame.draw.circle(surf, col, (x, y), 12)
+            pygame.draw.polygon(surf, (55, 60, 40), rot_rect(x, y, a, -rc, 16, 9))
+            pygame.draw.polygon(surf, (30, 32, 25), rot_rect(x, y, a, 14 - rc, 4, 11))
+            pygame.draw.circle(surf, (25, 25, 28), (x, y), 6)
+            pygame.draw.circle(surf, (230, 60, 50) if (t // 20) % 2 else (110, 30, 30), (x, y), 2)
+
+        elif self.kind == "Trading Post":
+            roof = (190, 70, 55)
+            pygame.draw.rect(surf, (150, 105, 55), (x - 11, y - 3, 22, 14), border_radius=2)
+            pygame.draw.polygon(surf, roof, [(x - 14, y - 3), (x, y - 15), (x + 14, y - 3)])
+            pygame.draw.polygon(surf, shade(roof, 0.6), [(x - 14, y - 3), (x, y - 15), (x + 14, y - 3)], 1)
+            pygame.draw.rect(surf, (80, 55, 30), (x - 3, y + 2, 6, 9))
+            pygame.draw.circle(surf, (255, 220, 70), (x + 7, y + 4), 3)
+            pygame.draw.circle(surf, (190, 150, 30), (x + 7, y + 4), 3, 1)
+
+        elif self.kind == "Prism Tower":
+            pts = regular_poly(x, y, 15, 3, a)
+            pygame.draw.polygon(surf, shade(col, 0.5), pts)
+            pygame.draw.polygon(surf, col, regular_poly(x, y, 12, 3, a))
+            pygame.draw.polygon(surf, (235, 235, 255), regular_poly(x, y, 6, 3, a + math.pi))
+            for p, cc in zip(pts, ((255, 90, 90), (90, 255, 120), (100, 140, 255))):
+                pygame.draw.circle(surf, cc, (int(p[0]), int(p[1])), 3)
+        if any(self.tiers):
+            label = SMALL.render("-".join(map(str, self.tiers)), True, (255, 235, 120))
+            surf.blit(label, (x - label.get_width() // 2, y + 21))
+        if selected:
+            r = min(self.stats["range"], 400)
+            s = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+            pygame.draw.circle(s, (255, 255, 255, 40), (r, r), r)
+            pygame.draw.circle(s, (255, 255, 255, 120), (r, r), r, 2)
+            surf.blit(s, (x - r, y - r))
+
+
+# ---- rounds ---------------------------------------------------------------
+def make_round(r):
+    groups = []
+    for tier in range(1, 7):
+        start = (tier - 1) * 4 + 1
+        if r >= start:
+            n = 8 + 2 * (r - start)
+            if r > start + 6:
+                n //= 3
+            groups.append((tier, min(n, 45)))
+    queue = []
+    t = 0
+    for tier, n in groups:
+        gap = max(8, 30 - tier * 3)
+        for _ in range(n):
+            queue.append((t, tier, False))
+            t += gap
+        t += 40
+    if r % 8 == 0:
+        queue.append((t, 1, True))
+    return queue
+
+
+MAX_ROUND = 40
+
+
+class Game:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.balloons, self.projectiles, self.towers, self.effects = [], [], [], []
+        self.money, self.lives, self.round = 650, 100, 0
+        self.queue, self.frame = [], 0
+        self.round_active = False
+        self.selected_shop = None
+        self.selected_tower = None
+        self.fast = False
+        self.state = "play"  # play / over / win
+
+    def damage(self, b, dmg, bm=1):
+        if not b.alive:
+            return
+        if b.boss:
+            b.hp -= dmg * bm
+            self.money += 1
+            if b.hp <= 0:
+                b.alive = False
+                self.money += 40
+                for i in range(4):
+                    self.balloons.append(Balloon(5, max(0, b.dist - i * 14)))
+            return
+        b.tier -= dmg
+        self.money += 1
+        if b.tier <= 0:
+            b.alive = False
+        else:
+            b.x, b.y = pos_at(b.dist)
+
+    def start_round(self):
+        if self.round_active or self.state != "play":
+            return
+        self.round += 1
+        self.queue = make_round(self.round)
+        self.frame = 0
+        self.round_active = True
+
+    def step(self):
+        if self.state != "play":
+            return
+        if self.round_active:
+            while self.queue and self.queue[0][0] <= self.frame:
+                _, tier, boss = self.queue.pop(0)
+                hp = 100 + 60 * (self.round // 8)
+                self.balloons.append(Balloon(tier, 0, boss, hp))
+            self.frame += 1
+        for t in self.towers:
+            t.update(self)
+        for p in self.projectiles:
+            p.update(self)
+        for b in self.balloons:
+            if b.alive:
+                b.update()
+                if b.dist >= TOTAL:
+                    b.alive = False
+                    self.lives -= (30 if b.boss else b.tier)
+        self.balloons = [b for b in self.balloons if b.alive]
+        self.projectiles = [p for p in self.projectiles if p.alive]
+        if self.lives <= 0:
+            self.state = "over"
+        if self.round_active and not self.queue and not self.balloons:
+            self.round_active = False
+            self.money += 100 + self.round * 5 + sum(t.stats["income"] for t in self.towers)
+            self.money += sum(min(int(self.money * t.stats.get("interest", 0) / 100), 400)
+                              for t in self.towers)
+            if self.round >= MAX_ROUND:
+                self.state = "win"
+
+    def buff_for(self, tower):
+        """Fire-rate multiplier (lower = faster) from nearby Trading Post support auras."""
+        mult = 1.0
+        for o in self.towers:
+            aura = o.stats.get("aura", 0)
+            if o is not tower and aura and math.dist((o.x, o.y), (tower.x, tower.y)) <= o.stats["range"]:
+                mult *= 1 - aura / 100
+        return max(0.5, mult)
+
+    def can_place(self, p):
+        if p[0] > MAP_W - 20 or p[0] < 20 or p[1] < 20 or p[1] > H - 20:
+            return False
+        if dist_to_path(p) < PATH_WIDTH / 2 + 18:
+            return False
+        return all(math.dist(p, (t.x, t.y)) > 40 for t in self.towers)
+
+
+game = Game()
+
+SHOP_RECTS = {name: pygame.Rect(MAP_W + 10, 66 + i * 43, W - MAP_W - 20, 40)
+              for i, name in enumerate(TOWER_TYPES)}
+UPG_RECTS = [pygame.Rect(MAP_W + 10, 150 + i * 60, W - MAP_W - 20, 56) for i in range(3)]
+MODE_RECT = pygame.Rect(MAP_W + 10, 336, W - MAP_W - 20, 30)
+SELL_RECT = pygame.Rect(MAP_W + 10, 372, W - MAP_W - 20, 30)
+BACK_RECT = pygame.Rect(MAP_W + 10, 410, W - MAP_W - 20, 30)
+START_RECT = pygame.Rect(MAP_W + 10, 604, W - MAP_W - 20, 40)
+FAST_RECT = pygame.Rect(MAP_W + 10, 650, W - MAP_W - 20, 34)
+
+
+def button(rect, text, enabled=True, col=(70, 80, 110), sub=None, sub2=None, subcol=None):
+    c = col if enabled else (60, 60, 65)
+    pygame.draw.rect(screen, c, rect, border_radius=6)
+    pygame.draw.rect(screen, (120, 130, 160), rect, 1, border_radius=6)
+    screen.blit(FONT.render(text, True, WHITE if enabled else (140, 140, 140)), (rect.x + 8, rect.y + 4))
+    dim = (200, 200, 210) if enabled else (120, 120, 125)
+    sy = 22 if rect.height < 50 else 24
+    if sub:
+        screen.blit(SMALL.render(sub, True, subcol if (subcol and enabled) else dim), (rect.x + 8, rect.y + sy))
+    if sub2:
+        screen.blit(SMALL.render(sub2, True, dim), (rect.x + 8, rect.y + sy + 15))
+
+
+BG = build_bg()
+
+
+def draw_world():
+    screen.blit(BG, (0, 0))
+    for t in game.towers:
+        t.draw(screen, t is game.selected_tower)
+    for b in game.balloons:
+        b.draw(screen)
+    for p in game.projectiles:
+        p.draw(screen)
+    for e in game.effects[:]:
+        if e[0] == "boom":
+            r = int(e[3])
+            fx = pygame.Surface((r * 2 + 4, r * 2 + 4), pygame.SRCALPHA)
+            pygame.draw.circle(fx, (255, 190, 60, 90), (r + 2, r + 2), r)
+            pygame.draw.circle(fx, (255, 120, 30, 200), (r + 2, r + 2), r, 3)
+            screen.blit(fx, (int(e[1]) - r - 2, int(e[2]) - r - 2))
+        elif e[0] == "ring":
+            pygame.draw.circle(screen, (180, 230, 255), (int(e[1]), int(e[2])), int(e[3]), 2)
+        elif e[0] == "shot":
+            pygame.draw.line(screen, (255, 255, 120), (e[1], e[2]), (e[3], e[4]), 2)
+        elif e[0] == "bolt":
+            x1, y1, x2, y2 = e[1:5]
+            pts = [(x1, y1)]
+            for k in range(1, 5):
+                f = k / 5
+                pts.append((x1 + (x2 - x1) * f + random.uniform(-6, 6), y1 + (y2 - y1) * f + random.uniform(-6, 6)))
+            pts.append((x2, y2))
+            pygame.draw.lines(screen, (150, 235, 255), False, pts, 3)
+            pygame.draw.lines(screen, (255, 255, 255), False, pts, 1)
+        elif e[0] == "flame":
+            _, fx0, fy0, ang, rng_, cone, _life = e
+            R = int(rng_) + 4
+            fl = pygame.Surface((R * 2, R * 2), pygame.SRCALPHA)
+            for scale, c in ((1.0, (255, 120, 30, 110)), (0.75, (255, 180, 50, 140)), (0.5, (255, 240, 150, 170))):
+                pts = [(R, R)]
+                for k in range(9):
+                    aa = ang - cone + 2 * cone * k / 8
+                    pts.append((R + math.cos(aa) * R * scale, R + math.sin(aa) * R * scale))
+                pygame.draw.polygon(fl, c, pts)
+            screen.blit(fl, (int(fx0) - R, int(fy0) - R))
+        elif e[0] == "beam":
+            pygame.draw.line(screen, (255, 170, 255), (e[1], e[2]), (e[3], e[4]), 6)
+            pygame.draw.line(screen, (255, 255, 255), (e[1], e[2]), (e[3], e[4]), 2)
+        e[-1] -= 1
+        if e[-1] <= 0:
+            game.effects.remove(e)
+
+
+def draw_panel():
+    pygame.draw.rect(screen, PANEL, (MAP_W, 0, W - MAP_W, H))
+    screen.blit(FONT.render(f"Money: ${game.money}", True, (250, 220, 90)), (MAP_W + 10, 10))
+    screen.blit(FONT.render(f"Lives: {max(0, game.lives)}", True, (240, 110, 110)), (MAP_W + 10, 32))
+    screen.blit(FONT.render(f"Round: {game.round}/{MAX_ROUND}", True, WHITE), (MAP_W + 140, 10))
+    t = game.selected_tower
+    if not t:
+        for name, rect in SHOP_RECTS.items():
+            d = TOWER_TYPES[name]
+            sel = game.selected_shop == name
+            button(rect, f"{name}  ${d['cost']}", game.money >= d["cost"],
+                   (100, 120, 70) if sel else (70, 80, 110), d["desc"])
+    else:
+        screen.blit(FONT.render(f"{t.kind}   {t.tiers[0]}-{t.tiers[1]}-{t.tiers[2]}", True, WHITE),
+                    (MAP_W + 10, 66))
+        lines, cur = [], ""
+        for part in stat_text(t):
+            if cur and len(cur) + len(part) > 30:
+                lines.append(cur)
+                cur = part
+            else:
+                cur = part if not cur else cur + "   " + part
+        if cur:
+            lines.append(cur)
+        for i, ln in enumerate(lines[:3]):
+            screen.blit(SMALL.render(ln, True, (190, 200, 215)), (MAP_W + 10, 92 + i * 16))
+        for i, rect in enumerate(UPG_RECTS):
+            pname = t.base["paths"][i][0]
+            up, reason = t.upgrade_status(i)
+            if reason == "Maxed":
+                button(rect, "MAXED", False, sub=f"{pname}  5/5")
+            elif reason == "Locked":
+                button(rect, "Locked", False, sub=f"{pname}  (path limit)")
+            else:
+                cost, name, mods = up
+                button(rect, f"{name}  ${cost}", game.money >= cost, (80, 110, 80),
+                       f"{pname}  {t.tiers[i] + 1}/5", describe(mods), PATH_COLORS[i])
+        if t.kind not in NO_TARGET:
+            button(MODE_RECT, f"Target: {MODES[t.mode]}")
+        button(SELL_RECT, f"Sell  +${int(t.spent * 0.7)}", True, (120, 70, 70))
+        button(BACK_RECT, "< Back to shop")
+    button(START_RECT, "Start round (SPACE)" if not game.round_active else "Round in progress",
+           not game.round_active, (60, 120, 160))
+    button(FAST_RECT, "Fast-forward: ON" if game.fast else "Fast-forward: OFF", True, (90, 90, 60))
+    if game.selected_shop:
+        mx, my = pygame.mouse.get_pos()
+        if mx < MAP_W:
+            ok = game.can_place((mx, my))
+            r = min(TOWER_TYPES[game.selected_shop]["range"], 400)
+            s = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+            c = (255, 255, 255, 50) if ok else (255, 60, 60, 70)
+            pygame.draw.circle(s, c, (r, r), r)
+            screen.blit(s, (mx - r, my - r))
+            pygame.draw.circle(screen, TOWER_TYPES[game.selected_shop]["color"], (mx, my), 16)
+
+
+def draw_overlay(text, sub):
+    s = pygame.Surface((MAP_W, H), pygame.SRCALPHA)
+    s.fill((0, 0, 0, 150))
+    screen.blit(s, (0, 0))
+    t = BIG.render(text, True, WHITE)
+    screen.blit(t, (MAP_W // 2 - t.get_width() // 2, H // 2 - 30))
+    u = FONT.render(sub, True, WHITE)
+    screen.blit(u, (MAP_W // 2 - u.get_width() // 2, H // 2 + 14))
+
+
+def handle_click(pos):
+    if game.state != "play":
+        return
+    if pos[0] < MAP_W:
+        if game.selected_shop:
+            cost = TOWER_TYPES[game.selected_shop]["cost"]
+            if game.money >= cost and game.can_place(pos):
+                game.towers.append(Tower(game.selected_shop, *pos))
+                game.money -= cost
+                if not pygame.key.get_mods() & pygame.KMOD_SHIFT:
+                    game.selected_shop = None
+            return
+        game.selected_tower = None
+        for t in game.towers:
+            if math.dist(pos, (t.x, t.y)) < 20:
+                game.selected_tower = t
+        return
+    if not game.selected_tower:
+        for name, rect in SHOP_RECTS.items():
+            if rect.collidepoint(pos):
+                game.selected_shop = None if game.selected_shop == name else name
+                return
+    t = game.selected_tower
+    if t:
+        if BACK_RECT.collidepoint(pos):
+            game.selected_tower = None
+            return
+        for i, rect in enumerate(UPG_RECTS):
+            if rect.collidepoint(pos):
+                up, reason = t.upgrade_status(i)
+                if up and not reason and game.money >= up[0]:
+                    if t.upgrade(i):
+                        game.money -= up[0]
+                return
+        if MODE_RECT.collidepoint(pos) and t.kind not in NO_TARGET:
+            t.mode = (t.mode + 1) % 3
+        elif SELL_RECT.collidepoint(pos):
+            game.money += int(t.spent * 0.7)
+            game.towers.remove(t)
+            game.selected_tower = None
+    if START_RECT.collidepoint(pos):
+        game.start_round()
+    if FAST_RECT.collidepoint(pos):
+        game.fast = not game.fast
+
+
+def main(max_frames=None):
+    frames = 0
+    while True:
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                handle_click(e.pos)
+            if e.type == pygame.MOUSEBUTTONDOWN and e.button == 3:
+                game.selected_shop = None
+            if e.type == pygame.KEYDOWN:
+                if e.key == pygame.K_SPACE:
+                    game.start_round()
+                elif e.key == pygame.K_f:
+                    game.fast = not game.fast
+                elif e.key == pygame.K_ESCAPE:
+                    game.selected_shop = None
+                    game.selected_tower = None
+                elif e.key == pygame.K_r and game.state != "play":
+                    game.reset()
+        for _ in range(3 if game.fast else 1):
+            game.step()
+        TICK[0] += 1
+        draw_world()
+        draw_panel()
+        if game.state == "over":
+            draw_overlay("GAME OVER", f"You reached round {game.round}. Press R to restart.")
+        elif game.state == "win":
+            draw_overlay("YOU WIN!", "All balloons popped. Press R to play again.")
+        pygame.display.flip()
+        clock.tick(60)
+        frames += 1
+        if max_frames and frames >= max_frames:
+            return
+
+
+if __name__ == "__main__":
+    main()
